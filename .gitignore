@@ -10,3 +10,7 @@
 # Python
 __pycache__/
 *.py[cod]
+
+# Cloudflare wrangler
+cloudflare/.wrangler/
+cloudflare/node_modules/

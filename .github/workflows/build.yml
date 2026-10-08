@@ -29,14 +29,14 @@ on:
       - .github/workflows/build.yml
   schedule:
     # Daily check.  This is *not* a blind rebuild: the plan job compares the
-    # AUR version of every configured package with the version already in the
-    # object store and only rebuilds what actually changed.
+    # AUR version of every configured package with the version already
+    # published and only rebuilds what actually changed.
     - cron: "17 3 * * *"
 
 permissions:
-  contents: read
+  contents: write
 
-# Never let two runs write to the same repository database at once.
+# Never let two runs publish to the same release at once.
 concurrency:
   group: aur-build
   cancel-in-progress: false
@@ -48,20 +48,10 @@ defaults:
     shell: bash
 
 env:
-  # rclone is configured entirely through environment variables.
-  RCLONE_CONFIG_R2_TYPE: s3
-  RCLONE_CONFIG_R2_PROVIDER: Cloudflare
-  RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-  RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-  RCLONE_CONFIG_R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-  RCLONE_CONFIG_R2_REGION: auto
-  # Remote directory that holds the repository (db + packages).  The remote
-  # name must match the RCLONE_CONFIG_<NAME>_* variables above (R2).
-  R2_PATH: R2:${{ vars.R2_BUCKET }}/${{ vars.R2_PREFIX }}
-  # Optional package signing.
-  GPG_KEY: ${{ secrets.GPG_KEY }}
-  GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-  GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+  # The gh CLI authenticates with this token to create the release and upload
+  # assets.  GITHUB_REPOSITORY is provided automatically by Actions and is used
+  # by the scripts to locate the repository.
+  GH_TOKEN: ${{ github.token }}
   # Cache of .SRCINFO files fetched from the AUR.
   AUR_CACHE: ${{ github.workspace }}/.cache/aur
   BUILDER_USER: builder
@@ -78,7 +68,7 @@ jobs:
       # git must be installed before actions/checkout can run inside the
       # Arch container.
       - name: Install prerequisites
-        run: pacman -Syu --noconfirm --needed git python rclone libarchive
+        run: pacman -Syu --noconfirm --needed git python github-cli libarchive
       - uses: actions/checkout@v4
       - name: Cache AUR metadata
         uses: actions/cache@v4
@@ -109,7 +99,7 @@ jobs:
       image: archlinux:base-devel
     steps:
       - name: Install prerequisites
-        run: pacman -Syu --noconfirm --needed git python rclone libarchive gnupg sudo
+        run: pacman -Syu --noconfirm --needed git python github-cli libarchive gnupg sudo
       - uses: actions/checkout@v4
       - name: Create unprivileged build user
         run: |
@@ -133,5 +123,5 @@ jobs:
           name: plan
       - name: Build packages
         run: python3 scripts/build.py --config packages.toml --plan plan.json --repo-dir public --work-dir work
-      - name: Publish repository
+      - name: Publish to GitHub release
         run: python3 scripts/publish.py --config packages.toml --repo-dir public

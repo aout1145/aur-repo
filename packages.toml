@@ -16,23 +16,24 @@
 # The AUR packages (package names or pkgbase names) to build and keep up to
 # date in the repository.
 packages = [
-  "paru",
-  "aurutils",
-  # "mpv-full-git",   # example: automatically pulls in the AUR dep ffmpeg-git
+  "cpeditor",
 ]
 
 [repo]
 # Base name of the pacman database.  With `name = "custom"` clients add a
 # `[custom]` section to pacman.conf and the file published to storage is
 # `custom.db`.
-name = "custom"
+name = "aout"
+
+# The GitHub release tag that holds the repository.  All packages and the
+# database are uploaded as assets of this single release.
+tag = "repo"
 
 # Architecture to build for.  GitHub's runners are x86_64.
 arch = "x86_64"
 
-# When a package is rebuilt, remove older package files from the object store
-# so the bucket does not grow forever.  The R2 token needs delete permission.
-# Off by default.
+# When a package is rebuilt, remove older package assets from the release so it
+# does not grow forever.  Off by default.
 remove_old = false
 
 [build]

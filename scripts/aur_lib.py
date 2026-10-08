@@ -6,7 +6,7 @@ This module knows how to:
   * parse ``.SRCINFO`` files
   * resolve the AUR dependency graph (including AUR-only dependencies)
   * read a pacman repository database and compare versions
-  * run small external helpers (``pacman``, ``vercmp``, ``rclone``, ``gpg``)
+  * run small external helpers (``pacman``, ``vercmp``, ``gh``, ``gpg``)
 
 Only the Python standard library plus PyYAML are required.
 """
@@ -83,6 +83,7 @@ DEFAULT_CONFIG = {
     "repo": {
         "name": "custom",
         "arch": "x86_64",
+        "tag": "repo",
         "remove_old": False,
     },
     "build": {
@@ -298,6 +299,22 @@ def parse_srcinfo(text: str) -> dict:
 def dep_name(spec: str) -> str:
     """Strip a version constraint from a dependency specification."""
     return re.split(r"[<>=]", spec, 1)[0].strip()
+
+
+# GitHub release assets may only contain alphanumerics and ``. - _``; anything
+# else (notably the ``:`` used for Arch package epochs, and ``+``) is renamed
+# by GitHub, which would make the filename stored in the repository database
+# wrong.  Sanitise locally instead, before ``repo-add`` sees the file.
+_GH_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def sanitize_filename(name: str) -> str:
+    return _GH_UNSAFE.sub("_", name)
+
+
+def github_repo() -> str:
+    """``owner/repo`` from the environment (set by GitHub Actions)."""
+    return os.environ.get("GITHUB_REPOSITORY", "")
 
 
 # ---------------------------------------------------------------------------
@@ -544,10 +561,5 @@ def run(cmd: list[str], dry_run: bool = False, check: bool = True, **kwargs) -> 
     return subprocess.run(cmd, check=check, **kwargs)
 
 
-def rclone_available() -> bool:
-    """True when rclone, a remote path and R2 credentials are all configured."""
-    return (
-        bool(os.environ.get("R2_PATH"))
-        and bool(os.environ.get("RCLONE_CONFIG_R2_ACCESS_KEY_ID"))
-        and shutil.which("rclone") is not None
-    )
+def gh_available() -> bool:
+    return shutil.which("gh") is not None

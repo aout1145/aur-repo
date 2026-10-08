@@ -4,11 +4,15 @@
 For every pkgbase in the plan, in dependency order:
 
   * if it must be built, clone its AUR git repository, run ``makepkg`` (as a
-    non-root user), optionally sign the result, install it into the running
-    container so that later builds can use it, and add it to the local
-    repository database if it should be published;
-  * otherwise download the already published package from object storage and
-    install it, so that dependents can be built against it.
+    non-root user), sign the result if configured, install it into the running
+    container so later builds can use it, and add it to the local repository
+    database;
+  * otherwise download the already published package from the GitHub release
+    and install it, so dependents can be built against it.
+
+Package files are renamed to a GitHub-release-safe name *before* they are added
+to the repository database, so the database's ``%FILENAME%`` matches the asset
+name (GitHub renames characters such as ``:`` and ``+`` otherwise).
 
 The assembled repository is left in ``--repo-dir`` for ``publish.py``.
 """
@@ -26,7 +30,14 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from aur_lib import load_config, log, rclone_available, run  # noqa: E402
+from aur_lib import (  # noqa: E402
+    gh_available,
+    github_repo,
+    load_config,
+    log,
+    run,
+    sanitize_filename,
+)
 
 AUR_GIT = "https://aur.archlinux.org"
 
@@ -72,20 +83,25 @@ def _which(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Object storage
+# GitHub Releases
 # ---------------------------------------------------------------------------
-def rclone_get(remote_dir: str, filename: str, dest: str, dry_run: bool) -> bool:
-    if not rclone_available():
+def gh_release_download(repo: str, tag: str, filename: str, dest_dir: str, dry_run: bool) -> bool:
+    if not repo or not gh_available():
         return False
-    remote = remote_dir.rstrip("/") + "/" + filename
     proc = run(
-        ["rclone", "copyto", remote, os.path.join(dest, filename)],
+        [
+            "gh", "release", "download", tag,
+            "--repo", repo,
+            "--pattern", filename,
+            "--dir", dest_dir,
+            "--clobber",
+        ],
         check=False,
         capture_output=True,
         text=True,
         dry_run=dry_run,
     )
-    return proc.returncode == 0
+    return proc.returncode == 0 and os.path.exists(os.path.join(dest_dir, filename))
 
 
 # ---------------------------------------------------------------------------
@@ -121,14 +137,14 @@ def main() -> int:
     parser.add_argument("--work-dir", default="work")
     parser.add_argument("--downloads-dir", default="downloads")
     parser.add_argument("--builder-user", default=os.environ.get("BUILDER_USER", "builder"))
-    parser.add_argument("--remote", default=os.environ.get("R2_PATH", ""))
+    parser.add_argument("--repo", default=github_repo(), help="owner/repo (defaults to $GITHUB_REPOSITORY)")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    repo = cfg["repo"]
+    repo_name = cfg["repo"]["name"]
+    tag = cfg["repo"].get("tag", "repo")
     build_cfg = cfg["build"]
-    repo_name = repo["name"]
 
     with open(args.plan, "r", encoding="utf-8") as fh:
         plan = json.load(fh)
@@ -146,29 +162,26 @@ def main() -> int:
         import_key(os.environ["GPG_PRIVATE_KEY"], args.dry_run)
 
     # Seed the local repository with the currently published database so that
-    # packages which are not rebuilt keep their entries.
+    # packages which are not rebuilt keep their entries.  GitHub serves the
+    # asset as `<name>.db`; repo-add wants the compressed-suffix form.
     repo_db = os.path.join(args.repo_dir, f"{repo_name}.db.tar.gz")
-    if args.remote and rclone_available():
-        remote_db = args.remote.rstrip("/") + f"/{repo_name}.db"
-        proc = run(
-            ["rclone", "copyto", remote_db, repo_db],
-            check=False,
-            capture_output=True,
-            text=True,
-            dry_run=args.dry_run,
-        )
-        if proc.returncode != 0:
+    downloaded_db = os.path.join(args.repo_dir, f"{repo_name}.db")
+    if args.repo and gh_available():
+        if gh_release_download(args.repo, tag, f"{repo_name}.db", args.repo_dir, args.dry_run):
+            if not args.dry_run:
+                os.replace(downloaded_db, repo_db)
+        else:
             log("note: no published database found (first build)")
 
     # Download already published packages that we are not rebuilding but that
     # are needed as dependencies.
-    if args.remote and rclone_available():
+    if args.repo and gh_available():
         for pkgbase, node in nodes.items():
             if pkgbase in build_set:
                 continue
             for filename in node.get("install_files", []):
                 if not os.path.exists(os.path.join(args.downloads_dir, filename)):
-                    rclone_get(args.remote, filename, args.downloads_dir, args.dry_run)
+                    gh_release_download(args.repo, tag, filename, args.downloads_dir, args.dry_run)
 
     publish_files: list[str] = []
 
@@ -195,14 +208,13 @@ def main() -> int:
                 raise SystemExit(f"build of {pkgbase} produced no packages")
 
             for package in built:
-                if not node["publish"]:
-                    continue
-                destination = os.path.join(args.repo_dir, os.path.basename(package))
+                # Rename to a GitHub-release-safe asset name.  repo-add records
+                # this name as %FILENAME%, so clients download the same file.
+                safe = sanitize_filename(os.path.basename(package))
+                destination = os.path.join(args.repo_dir, safe)
                 if not args.dry_run:
                     shutil.copy2(package, destination)
                 if signing_key:
-                    # Sign the copy that will be published so that the
-                    # detached signature ends up next to it in the repo.
                     sign_file(destination, signing_key, passphrase, args.dry_run)
                 publish_files.append(destination)
 
@@ -216,7 +228,7 @@ def main() -> int:
                     + ", ".join(os.path.basename(f) for f in missing))
             run_pacman_u([f for f in files if os.path.exists(f)], args.dry_run)
 
-    # Update the repository database with the newly published packages.
+    # Update the repository database with the newly built packages.
     if publish_files:
         cmd = ["repo-add", "--nocolor", "-q"]
         if signing_key:

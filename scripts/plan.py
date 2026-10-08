@@ -23,6 +23,8 @@ from aur_lib import (  # noqa: E402
     Pacman,
     db_filenames_for,
     db_version_for,
+    gh_available,
+    github_repo,
     load_config,
     load_db,
     log,
@@ -37,19 +39,25 @@ def parse_filter(value: str) -> set[str]:
     return {part for part in value.replace(",", " ").split() if part}
 
 
-def fetch_db(remote_path: str, repo_name: str, dest: str) -> str | None:
-    """Download ``<repo>.db`` from the object store.  Returns the local path."""
-    if not remote_path or not os.environ.get("RCLONE_CONFIG_R2_ACCESS_KEY_ID"):
+def fetch_db(repo: str, tag: str, repo_name: str, directory: str) -> str | None:
+    """Download ``<repo>.db`` from the GitHub release.  Returns the local path."""
+    if not repo or not gh_available():
         return None
-    remote = remote_path.rstrip("/") + f"/{repo_name}.db"
+    dest = os.path.join(directory, f"{repo_name}.db")
     proc = run(
-        ["rclone", "copyto", remote, dest],
+        [
+            "gh", "release", "download", tag,
+            "--repo", repo,
+            "--pattern", f"{repo_name}.db",
+            "--dir", directory,
+            "--clobber",
+        ],
         check=False,
         capture_output=True,
         text=True,
     )
-    if proc.returncode != 0:
-        log(f"note: no existing database at {remote} (first run?)")
+    if proc.returncode != 0 or not os.path.exists(dest):
+        log(f"note: no published database in release '{tag}' (first run?)")
         return None
     return dest
 
@@ -62,16 +70,18 @@ def main() -> int:
     parser.add_argument("--packages", default="", help="subset filter (names)")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--update-vcs", action="store_true")
-    parser.add_argument("--remote", default=os.environ.get("R2_PATH", ""))
+    parser.add_argument("--repo", default=github_repo(), help="owner/repo (defaults to $GITHUB_REPOSITORY)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     repo_name = cfg["repo"]["name"]
+    tag = cfg["repo"].get("tag", "repo")
     build_opts = cfg["build"]
 
     db_path = args.db
-    if not db_path and args.remote:
-        db_path = fetch_db(args.remote, repo_name, "published.db")
+    if not db_path and args.repo:
+        download_dir = os.path.dirname(os.path.abspath(args.out)) or "."
+        db_path = fetch_db(args.repo, tag, repo_name, download_dir)
     db = load_db(db_path) if db_path else {}
 
     client = AurClient()

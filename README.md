@@ -1,15 +1,19 @@
 # AUR 自动构建仓库
 
-基于 GitHub Actions 的 AUR 包自动构建与发布系统：把 AUR 包编译成二进制包，上传到
-Cloudflare R2，并生成可以直接添加进 `pacman` 的软件仓库。
+基于 GitHub Actions 的 AUR 包自动构建与发布系统：把 AUR 包编译成二进制包，发布到
+**GitHub Releases**，并生成可以直接添加进 `pacman` 的软件仓库；可选地通过
+**Cloudflare Worker** 加速（对访问 GitHub 较慢的网络尤其有用）。
 
 - **配置简单**：根目录一个 [`packages.toml`](packages.toml) 决定要构建哪些包。
 - **正确处理 AUR 依赖**：自动解析依赖图（包括只存在于 AUR 的依赖），按拓扑顺序先构建
   依赖再构建目标包。
 - **按需更新**：只有「仓库里没有」或「AUR 版本比已发布的更新」时才会重建；定时任务也只
   是检查版本，**不会无条件重新构建**。
+- **无需额外存储**：产物直接作为本仓库某个 Release 的附件，不依赖 R2/对象存储。
+- **规避 GitHub 文件名限制**：自动重命名包含 `:`、`+` 等字符的包文件，并让数据库中的
+  `%FILENAME%` 与实际附件名保持一致。
+- **Cloudflare 加速**：附带一个 Worker，把 GitHub Release 附件代理到 Cloudflare 边缘并缓存。
 - **可签名**：支持用 GPG 对软件包和数据库签名，并自动发布公钥。
-- **对象存储**：产物上传到 Cloudflare R2（S3 兼容），通过公开域名对外提供服务。
 
 ---
 
@@ -19,8 +23,8 @@ Cloudflare R2，并生成可以直接添加进 `pacman` 的软件仓库。
 
 | Job | 作用 |
 | --- | --- |
-| `plan` | 下载已发布的仓库数据库，解析 `packages.toml` 中所有包（含递归 AUR 依赖）的版本，和已发布版本比较，决定要构建哪些包，输出 `plan.json`。 |
-| `build` | 按依赖顺序构建（`makepkg`），把构建出的包安装进容器供后续依赖使用，更新本地仓库数据库，最后上传到 R2。 |
+| `plan` | 从 Release 下载已发布的仓库数据库，解析 `packages.toml` 中所有包（含递归 AUR 依赖）的版本，和已发布版本比较，决定要构建哪些包，输出 `plan.json`。 |
+| `build` | 按依赖顺序构建（`makepkg`），把构建出的包安装进容器供后续依赖使用，重命名包文件、更新仓库数据库，最后用 `gh` 上传到 Release。 |
 
 **触发方式（都不会无条件重建）：**
 
@@ -44,6 +48,17 @@ Cloudflare R2，并生成可以直接添加进 `pacman` 的软件仓库。
 `build` job 在**临时的 Arch 容器**里按顺序构建，用 `makepkg -s` 安装依赖，并把刚构建的包
 `pacman -U` 安装进去，所以依赖能被后续目标包正确使用。
 
+### 文件名为什么会被重命名
+
+GitHub Release 的附件名只允许字母、数字和 `. - _`，其它字符会被 GitHub 自动改写。
+Arch 包文件名在带 `epoch` 时会包含 `:`（例如 `foo-1:2.0-1-x86_64.pkg.tar.zst`），
+`pkgver` 也可能包含 `+`。
+
+如果直接上传，附件名会变成 `foo-1_2.0-1-...`，而仓库数据库里的 `%FILENAME%` 仍是原文，
+导致 pacman 下载 404。因此 `build.py` 会在 `repo-add` **之前**把包文件重命名为
+GitHub 安全的名字（把非法字符换成 `_`），这样数据库里的 `%FILENAME%` 与附件名一致，
+pacman 就能正确下载。包内部元数据不受影响，版本号里仍然保留 epoch。
+
 ### 按需更新逻辑
 
 对每个包，`plan.py` 采用如下判断（`force` 优先）：
@@ -53,50 +68,13 @@ Cloudflare R2，并生成可以直接添加进 `pacman` 的软件仓库。
 - VCS 包（源码 URL 形如 `git+…`）→ 默认不因版本比较而构建，只有开启 `update_vcs` 或 `force` 才构建；
 - 可选 `rebuild_dependents = true`：当某个 AUR 依赖本次被重建时，一并重建依赖它的包。
 
-已发布版本来自 R2 上的 `<repo>.db`，因此运行器是「无状态」的，不需要在仓库里 commit 任何东西。
+已发布版本来自 Release 上的 `<repo>.db`，因此运行器是「无状态」的，不需要在仓库里 commit 任何东西。
 
 ---
 
 ## 快速开始
 
-### 1. 准备 Cloudflare R2
-
-1. 新建一个 R2 bucket，例如 `aur-repo`。
-2. 打开公开访问：
-   - **推荐**：绑定自定义域名（例如 `repo.example.com`），走 Cloudflare CDN；
-   - 或临时使用 R2 的公开开发域名 `https://pub-xxxx.r2.dev`（有速率限制，仅测试用）。
-3. 创建一个 R2 API Token（权限：**Object Read & Write**；如果启用 `remove_old` 还需 Delete）。
-   记下：
-   - `Access Key ID`
-   - `Secret Access Key`
-   - Endpoint，形如 `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`
-
-### 2. 配置 GitHub Secrets / Variables
-
-在仓库 **Settings → Secrets and variables → Actions** 中添加：
-
-Secrets：
-
-| 名称 | 必填 | 说明 |
-| --- | --- | --- |
-| `R2_ACCESS_KEY_ID` | 是 | R2 API Token 的 Access Key ID |
-| `R2_SECRET_ACCESS_KEY` | 是 | R2 API Token 的 Secret |
-| `R2_ENDPOINT` | 是 | `https://<ACCOUNT_ID>.r2.cloudflarestorage.com` |
-| `GPG_KEY` | 否 | 签名用 GPG 密钥 ID（启用签名时必填） |
-| `GPG_PRIVATE_KEY` | 否 | ASCII armor 的私钥内容（启用签名时必填） |
-| `GPG_PASSPHRASE` | 否 | 私钥口令（若私钥无口令则留空） |
-
-Variables：
-
-| 名称 | 必填 | 说明 |
-| --- | --- | --- |
-| `R2_BUCKET` | 是 | bucket 名称，例如 `aur-repo` |
-| `R2_PREFIX` | 是 | 仓库在 bucket 中的目录，建议设为架构名，例如 `x86_64` |
-
-> `R2_PREFIX` 与下面的客户端 `Server` 地址要对应。建议 `R2_PREFIX = x86_64`，客户端用
-> `Server = https://repo.example.com/$arch`。
-
-### 3. 编辑 `packages.toml`
+### 1. 编辑 `packages.toml`
 
 ```toml
 packages = [
@@ -106,10 +84,11 @@ packages = [
 ]
 
 [repo]
-name = "custom"     # 数据库 -> custom.db，客户端配置 [custom]
+name = "custom"   # 数据库 -> custom.db，客户端配置 [custom]
+tag  = "repo"     # 所有产物放在这个 tag 的 Release 里
 ```
 
-参考文件内注释，可用的全局/单包选项：
+可用的全局/单包选项：
 
 ```toml
 [build]
@@ -124,7 +103,7 @@ update_vcs = true
 skip_check = true
 ```
 
-### 4. 运行
+### 2. 运行
 
 - 进入 **Actions → Build AUR repository → Run workflow**：
   - `packages`：只构建其中的包（空格或逗号分隔，留空表示全部）；
@@ -133,31 +112,41 @@ skip_check = true
 - 或直接 push 修改到 `packages.toml`。
 - 定时任务按需自动更新。
 
-### 5. 客户端使用
+workflow 使用自动提供的 `GITHUB_TOKEN`（`permissions: contents: write`）创建 Release 并上传附件，
+**不需要额外配置任何存储密钥**。
 
-给 `pacman.conf` 增加仓库（示例 `R2_PREFIX=x86_64`）：
+### 3. 客户端使用
+
+#### 方式 A：直连 GitHub Release
 
 ```ini
 [custom]
 SigLevel = Required DatabaseOptional
-Server = https://repo.example.com/$arch
+Server = https://github.com/OWNER/REPO/releases/download/repo
 ```
 
-**已签名**（推荐）时，先导入公钥（公钥会随仓库发布为 `<前缀>/repo.gpg`）：
+（`OWNER/REPO` 换成你的仓库，`repo` 是 `packages.toml` 里的 `tag`。pacman 会自动跟随
+GitHub 的下载重定向。）
+
+#### 方式 B：通过 Cloudflare 加速（推荐）
+
+见下一节。使用 Worker 地址：
+
+```ini
+[custom]
+SigLevel = Required DatabaseOptional
+Server = https://aur-repo.<你的子域>.workers.dev
+```
+
+**已签名**时，先导入公钥（公钥随仓库发布为 `repo.gpg`）：
 
 ```bash
-curl -fsSL https://repo.example.com/x86_64/repo.gpg -o /tmp/repo.gpg
+curl -fsSL <Server>/repo.gpg -o /tmp/repo.gpg
 sudo pacman-key --add /tmp/repo.gpg
 sudo pacman-key --lsign-key <你的GPG_KEYID>
 ```
 
-**未签名**时使用：
-
-```ini
-[custom]
-SigLevel = Optional TrustAll
-Server = https://repo.example.com/$arch
-```
+**未签名**时把 `SigLevel` 改为 `Optional TrustAll`。
 
 然后：
 
@@ -168,10 +157,51 @@ sudo pacman -S <包名>
 
 ---
 
+## Cloudflare 加速
+
+`cloudflare/` 目录里是一个 Worker：把 `/<文件>` 映射到
+`https://github.com/OWNER/REPO/releases/download/<tag>/<文件>`，跟随 GitHub 的重定向并把结果
+缓存在 Cloudflare 边缘。包文件是**不可变**的，缓存一年；数据库和公钥不缓存，始终回源，
+避免数据库与签名不一致。
+
+### 部署方式一：本地 wrangler
+
+```bash
+cd cloudflare
+# 编辑 wrangler.toml：把 GITHUB_REPO 改成你的 owner/repo，RELEASE_TAG 与 packages.toml 一致
+npx wrangler deploy
+```
+
+输出形如 `https://aur-repo.<子域>.workers.dev`，把它作为 pacman 的 `Server`。
+
+### 部署方式二：GitHub Actions
+
+1. 在 Cloudflare 创建 API Token（权限：`Workers Scripts: Edit`）和 Account ID。
+2. 仓库 Secrets 添加 `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`。
+3. 手动运行 **Actions → Deploy Cloudflare repository proxy**。
+   （该 workflow 会自动把 `GITHUB_REPO` 注入为当前仓库。）
+
+### 绑定自定义域名（可选）
+
+在 `cloudflare/wrangler.toml` 中取消注释：
+
+```toml
+[[routes]]
+pattern = "aur.example.com"
+custom_domain = true
+```
+
+再次部署后即可用 `https://aur.example.com` 作为 `Server`。
+
+> 若只需要 GitHub 直连、不需要加速，可以完全忽略 Cloudflare，删除 `cloudflare/` 与
+> `deploy-worker.yml` 即可。
+
+---
+
 ## 可选：配置 GPG 签名
 
 ```bash
-# 1. 生成一个无口令（或带口令）的签名密钥
+# 1. 生成一个签名密钥
 gpg --batch --passphrase '' --quick-generate-key "My AUR Repo <me@example.com>" rsa4096 sign never
 gpg --list-secret-keys --keyid-format=long     # 记下 KEYID
 
@@ -179,8 +209,15 @@ gpg --list-secret-keys --keyid-format=long     # 记下 KEYID
 gpg --armor --export-secret-keys <KEYID>
 ```
 
-把输出填到 `GPG_PRIVATE_KEY`，`GPG_KEY` 填 KEYID；若私钥有口令，设置 `GPG_PASSPHRASE`。
-CI 会用该密钥对每个软件包和数据库做分离签名，并发布 `repo.gpg`。
+在仓库 Secrets 中添加：
+
+| 名称 | 说明 |
+| --- | --- |
+| `GPG_KEY` | 上面的 KEYID |
+| `GPG_PRIVATE_KEY` | ASCII armor 的私钥内容 |
+| `GPG_PASSPHRASE` | 私钥口令（无口令则留空） |
+
+CI 会用该密钥对每个软件包和数据库做分离签名，并发布 `repo.gpg` 供客户端导入。
 
 ---
 
@@ -188,52 +225,60 @@ CI 会用该密钥对每个软件包和数据库做分离签名，并发布 `rep
 
 ```
 .
-├── packages.toml              # 要构建的 AUR 包列表 + 全局/单包配置
-├── .github/workflows/build.yml# plan / build / publish 流水线
+├── packages.toml                 # 要构建的 AUR 包列表 + 全局/单包配置
+├── .github/workflows/
+│   ├── build.yml                 # plan / build / publish 流水线
+│   └── deploy-worker.yml         # 部署 Cloudflare Worker（可选，手动）
+├── cloudflare/
+│   ├── worker.js                 # Cloudflare 代理 + 缓存
+│   └── wrangler.toml
 └── scripts/
-    ├── aur_lib.py             # AUR 客户端、依赖解析、仓库数据库读取、版本比较
-    ├── plan.py                # 生成构建计划（决定重建哪些包）
-    ├── build.py               # 按依赖顺序构建并组装本地仓库
-    └── publish.py             # 上传到 R2（可选清理旧版本）
+    ├── aur_lib.py                # AUR 客户端、依赖解析、仓库数据库读取、版本比较、文件名清洗
+    ├── plan.py                   # 生成构建计划（决定重建哪些包）
+    ├── build.py                  # 按依赖顺序构建并组装本地仓库
+    └── publish.py                # 上传到 GitHub Release（可选清理旧附件）
 ```
 
 ---
 
 ## 本地测试
 
-脚本只依赖 Python 标准库、`pacman`、`vercmp`、`bsdtar`（`libarchive`）、`git`、`rclone`。
+脚本只依赖 Python 标准库、`pacman`、`vercmp`、`bsdtar`（`libarchive`）、`git`、`gh`。
 
 ```bash
 # 只生成构建计划，不构建
 python3 scripts/plan.py --config packages.toml --out plan.json
 
-# 查看计划（会打印每个包是构建还是跳过以及原因）
-# 演练构建流程（不真正执行 makepkg / rclone）
+# 演练构建流程（不真正执行 makepkg / gh）
 python3 scripts/build.py --config packages.toml --plan plan.json --dry-run
 
-# 演练上传（未配置 R2 时会直接跳过）
-python3 scripts/publish.py --config packages.toml --dry-run
+# 演练上传（未登录 gh 时会直接跳过）
+python3 scripts/publish.py --config packages.toml --repo-dir public --dry-run
 ```
 
-只想构建某个包：
+指定仓库、只构建某个包：
 
 ```bash
-python3 scripts/plan.py --config packages.toml --packages paru --out plan.json
+python3 scripts/plan.py --config packages.toml --repo OWNER/REPO --packages paru --out plan.json
 ```
 
 ---
 
 ## 故障排查
 
+- **Release 附件名被改写 / pacman 404**：本系统已在 `repo-add` 前重命名文件，保证数据库里的
+  `%FILENAME%` 与附件名一致；如果手动往 Release 里放了带 `:`、`+` 的文件，请去掉这些字符。
 - **`plan` 显示某些依赖无法解析**：该依赖可能来自非官方仓库（如 `archlinuxcn`）。官方仓库没有
   且 AUR 也没有的依赖无法构建，需要手动处理。
 - **`makepkg` 在容器里以 root 失败**：workflow 会创建 `builder` 用户并让 `makepkg` 以该用户运行；
   本地运行 `build.py` 时请不要用 root。
-- **R2 首次运行没有数据库**：属于正常情况，`plan` 会把所有配置的包标记为「未发布」并构建。
-- **客户端报签名错误**：确认已 `pacman-key --lsign-key`，或临时把 `SigLevel` 改宽松。
-- **`remove_old` 删除了文件**：请确保 R2 token 具备 Delete 权限；该功能默认关闭。
+- **首次运行没有数据库**：属于正常情况，`plan` 会把所有配置的包标记为「未发布」并构建。
+- **Cloudflare 缓存**：只有包文件（不可变）会被边缘缓存；数据库与公钥始终回源，因此不会出现数据库过期或与签名不匹配的问题。
+- **附件超过 2 GB**：GitHub Release 单个附件上限为 2 GB，超大的包只能改用其它存储（例如 R2）。
+- **`remove_old`**：会删除不再被数据库引用的旧包附件，默认关闭。
 
 ## 安全提示
 
 构建过程会在 CI 中执行 AUR 上的 `PKGBUILD`。AUR 包由社区维护，请只构建你信任的包，并留意
-`packages.toml` 的变更。
+`packages.toml` 的变更。`makepkg` 以非 root 的 `builder` 用户运行，且不会继承 `GH_TOKEN`，
+因此 `PKGBUILD` 无法直接读取发布用的令牌；但请仍然只构建可信来源的包。

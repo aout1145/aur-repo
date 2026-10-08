@@ -1,0 +1,29 @@
+# Cloudflare Worker configuration for the repository proxy.
+#
+# Deploy with:
+#   cd cloudflare && npx wrangler deploy
+#
+# After deploying, `wrangler` prints the URL, e.g.
+#   https://aur-repo.<your-subdomain>.workers.dev
+# Use that (or a custom domain, see below) as the pacman `Server`.
+
+name = "aur-repo"
+main = "worker.js"
+compatibility_date = "2024-11-01"
+
+# Expose the Worker on its workers.dev URL.  Set to false if you only use a
+# custom domain.
+workers_dev = true
+
+[vars]
+# The GitHub repository that hosts the release assets.
+GITHUB_REPO = "OWNER/REPO"
+# Must match `[repo].tag` in packages.toml.
+RELEASE_TAG = "repo"
+
+# Optional: serve from a custom domain on a zone in your Cloudflare account
+# instead of the workers.dev URL.  Uncomment and adjust.
+#
+# [[routes]]
+# pattern = "aur.example.com"
+# custom_domain = true
