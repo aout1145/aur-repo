@@ -193,22 +193,32 @@ npx wrangler deploy
 
 ### 部署方式二：GitHub Actions
 
-1. 在 Cloudflare 创建 API Token（权限：`Workers Scripts: Edit`）和 Account ID。
+1. 在 Cloudflare 创建 API Token 和 Account ID。Token 权限：
+   - **Account → Workers Scripts → Edit**（上传 Worker，必需）
+   - **Zone → Workers Routes → Edit**（绑定自定义域名/路由时需要），并把
+     Zone Resources 设为包含目标域名所在的 zone。只用 `*.workers.dev` 时不需要。
 2. 仓库 Secrets 添加 `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`。
+   注意 `CLOUDFLARE_ACCOUNT_ID` 必须是**拥有该 zone 的账户**。
 3. 手动运行 **Actions → Deploy Cloudflare repository proxy**。
    （该 workflow 会自动把 `GITHUB_REPO` 注入为当前仓库。）
 
+> 最省事的方式是直接用 Cloudflare 的 **“Edit Cloudflare Workers”** Token 模板创建，
+> 并确认它包含上面的 Zone 权限。
+
 ### 绑定自定义域名（可选）
 
-在 `cloudflare/wrangler.toml` 中取消注释：
+在 `cloudflare/wrangler.toml` 中启用：
 
 ```toml
+workers_dev = false
+
 [[routes]]
 pattern = "aur.example.com"
 custom_domain = true
 ```
 
-再次部署后即可用 `https://aur.example.com` 作为 `Server`。
+要求：该域名（zone）在**同一个 Cloudflare 账户**下，且 API Token 具备
+**Zone → Workers Routes → Edit**。再次部署后即可用 `https://aur.example.com` 作为 `Server`。
 
 > 若只需要 GitHub 直连、不需要加速，可以完全忽略 Cloudflare，删除 `cloudflare/` 与
 > `deploy-worker.yml` 即可。
@@ -291,6 +301,7 @@ python3 scripts/plan.py --config packages.toml --repo OWNER/REPO --packages paru
   本地运行 `build.py` 时请不要用 root。
 - **首次运行没有数据库**：属于正常情况，`plan` 会把所有配置的包标记为「未发布」并构建。
 - **Cloudflare 缓存**：只有包文件（不可变）会被边缘缓存；数据库与公钥始终回源，因此不会出现数据库过期或与签名不匹配的问题。
+- **部署 Worker 报 `No access to the specified resource (/zones/<id>/workers/routes)`**：API Token 缺少 **Zone → Workers Routes → Edit**，或该域名（zone）不在 `CLOUDFLARE_ACCOUNT_ID` 对应的账户下。补齐权限/账户后重跑；若暂时不想处理，可把 `workers_dev = true` 并去掉 `[[routes]]`，先用 `*.workers.dev` 地址。
 - **附件超过 2 GB**：GitHub Release 单个附件上限为 2 GB，超大的包只能改用其它存储（例如 R2）。
 - **`remove_old`**：会删除不再被数据库引用的旧包附件，默认关闭。
 

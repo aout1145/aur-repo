@@ -2,6 +2,12 @@ name: Deploy Cloudflare repository proxy
 
 # Manual only: run this after setting the CLOUDFLARE_API_TOKEN and
 # CLOUDFLARE_ACCOUNT_ID secrets.  It deploys cloudflare/worker.js.
+#
+# The API token needs:
+#   * Account -> Workers Scripts -> Edit
+#   * Zone    -> Workers Routes  -> Edit   (only when binding a custom domain,
+#     i.e. [[routes]] with custom_domain = true; include the zone in
+#     "Zone Resources" and make sure it is in CLOUDFLARE_ACCOUNT_ID's account)
 on:
   workflow_dispatch:
 
