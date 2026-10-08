@@ -109,11 +109,28 @@ def replace_database(repo: str, tag: str, db_files: list[str], dry_run: bool) ->
             raise
 
 
-def release_assets(repo: str, tag: str) -> list[tuple[str, str]]:
-    """Return ``(asset_id, name)`` pairs for the release."""
+def release_id(repo: str, tag: str) -> str:
     proc = run(
-        ["gh", "api", f"repos/{repo}/releases/tags/{tag}", "--jq",
-         r'.assets[] | "\(.id) \(.name)"'],
+        ["gh", "api", f"repos/{repo}/releases/tags/{tag}", "--jq", ".id"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def release_assets(repo: str, tag: str) -> list[tuple[str, str]]:
+    """Return ``(asset_id, name)`` pairs for the release.
+
+    Uses the paginated assets endpoint so it also works for releases with many
+    assets.
+    """
+    rid = release_id(repo, tag)
+    if not rid:
+        return []
+    proc = run(
+        ["gh", "api", "--paginate", f"repos/{repo}/releases/{rid}/assets",
+         "--jq", r'.[] | "\(.id) \(.name)"'],
         check=False,
         capture_output=True,
         text=True,
@@ -126,6 +143,17 @@ def release_assets(repo: str, tag: str) -> list[tuple[str, str]]:
         if len(parts) == 2:
             assets.append((parts[0], parts[1]))
     return assets
+
+
+def verify_uploaded(repo: str, tag: str, names: list[str]) -> None:
+    """Fail if any expected asset is not actually present in the release."""
+    present = {name for _, name in release_assets(repo, tag)}
+    missing = sorted(set(names) - present)
+    if missing:
+        raise SystemExit(
+            "upload verification failed; missing release assets: " + ", ".join(missing)
+        )
+    log(f"upload verified ({len(names)} asset(s))")
 
 
 def prune(repo: str, tag: str, repo_dir: str, repo_name: str, dry_run: bool) -> None:
@@ -165,15 +193,17 @@ def main() -> int:
     repo_name = cfg["repo"]["name"]
     tag = cfg["repo"].get("tag", "repo")
 
-    if not args.repo:
-        log("no repository configured (set GITHUB_REPOSITORY or pass --repo); skipping upload")
-        return 0
-    if not gh_available():
-        log("the 'gh' CLI is not installed; skipping upload")
-        return 0
-    if not os.path.isdir(args.repo_dir):
-        log(f"{args.repo_dir} does not exist; nothing to upload")
-        return 0
+    if not args.repo or not gh_available() or not os.path.isdir(args.repo_dir):
+        if not args.repo:
+            problem = "no repository configured (set GITHUB_REPOSITORY or pass --repo)"
+        elif not gh_available():
+            problem = "the 'gh' CLI is not installed"
+        else:
+            problem = f"{args.repo_dir} does not exist; did the build step produce artifacts?"
+        if args.dry_run:
+            log(f"dry run: {problem}; skipping")
+            return 0
+        raise SystemExit(problem)
 
     ensure_release(args.repo, tag, args.dry_run)
 
@@ -195,9 +225,21 @@ def main() -> int:
     db_files = [f for f in all_files if os.path.basename(f) in (f"{repo_name}.db", f"{repo_name}.db.sig")]
     payload = [f for f in all_files if f not in db_files]
 
+    if not db_files:
+        if args.dry_run:
+            log("dry run: no database to publish")
+            return 0
+        raise SystemExit(
+            f"refusing to publish: {repo_name}.db was not found in {args.repo_dir}"
+        )
+
     # 1) Packages and the public key first, 2) the database last (atomically).
     upload(args.repo, tag, payload, args.dry_run)
     replace_database(args.repo, tag, db_files, args.dry_run)
+
+    # Never report success unless the assets really are present in the release.
+    if not args.dry_run:
+        verify_uploaded(args.repo, tag, [os.path.basename(f) for f in [*payload, *db_files]])
 
     if cfg["repo"].get("remove_old"):
         prune(args.repo, tag, args.repo_dir, repo_name, args.dry_run)

@@ -148,5 +148,6 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: repo
+          path: public
       - name: Publish to GitHub release
         run: python3 scripts/publish.py --config packages.toml --repo-dir public
