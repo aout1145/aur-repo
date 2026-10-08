@@ -16,7 +16,7 @@
 # The AUR packages (package names or pkgbase names) to build and keep up to
 # date in the repository.
 packages = [
-  "cpeditor",
+  "cpeditor-bin",
 ]
 
 [repo]
@@ -32,8 +32,8 @@ tag = "repo"
 # Architecture to build for.  GitHub's runners are x86_64.
 arch = "x86_64"
 
-# When a package is rebuilt, remove older package assets from the release so it
-# does not grow forever.  Off by default.
+# Remove stale package assets from the release: older versions of rebuilt
+# packages, and packages removed from this list.  Off by default.
 remove_old = false
 
 [build]

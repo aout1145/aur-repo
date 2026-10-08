@@ -62,7 +62,7 @@ jobs:
     container:
       image: archlinux:base-devel
     outputs:
-      has_build: ${{ steps.plan.outputs.has_build }}
+      has_work: ${{ steps.plan.outputs.has_work }}
       build_list: ${{ steps.plan.outputs.build_list }}
     steps:
       # git must be installed before actions/checkout can run inside the
@@ -93,7 +93,7 @@ jobs:
 
   build:
     needs: plan
-    if: needs.plan.outputs.has_build == 'true'
+    if: needs.plan.outputs.has_work == 'true'
     runs-on: ubuntu-latest
     container:
       image: archlinux:base-devel

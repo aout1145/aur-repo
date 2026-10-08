@@ -151,6 +151,7 @@ def main() -> int:
     nodes = plan["nodes"]
     build_set = set(plan["build"])
     order = plan["order"]
+    remove = list(plan.get("remove", []))
 
     os.makedirs(args.repo_dir, exist_ok=True)
     os.makedirs(args.work_dir, exist_ok=True)
@@ -172,6 +173,12 @@ def main() -> int:
                 os.replace(downloaded_db, repo_db)
         else:
             log("note: no published database found (first build)")
+
+    # Drop packages that are no longer part of the resolved graph (removed from
+    # packages.toml or no longer needed as a dependency).
+    if remove and os.path.exists(repo_db):
+        log("removing from the repository database: " + ", ".join(remove))
+        run(["repo-remove", "--nocolor", "-q", repo_db, *remove], dry_run=args.dry_run)
 
     # Download already published packages that we are not rebuilding but that
     # are needed as dependencies.
@@ -237,10 +244,13 @@ def main() -> int:
         cmd.extend(publish_files)
         run(cmd, dry_run=args.dry_run)
 
-    # Pacman fetches `<name>.db`; keep a copy of the compressed db under that
-    # name and detach-sign it if a key is configured.
+    # Pacman fetches `<name>.db`; repo-add/repo-remove create it as a symlink to
+    # `<name>.db.tar.gz`.  Replace it with a real file so it can be signed and
+    # uploaded as-is (and so copying never hits "same file").
     db_copy = os.path.join(args.repo_dir, f"{repo_name}.db")
     if os.path.exists(repo_db) and not args.dry_run:
+        if os.path.islink(db_copy) or os.path.exists(db_copy):
+            os.remove(db_copy)
         shutil.copy2(repo_db, db_copy)
         if signing_key:
             sign_file(db_copy, signing_key, passphrase, args.dry_run)
@@ -251,10 +261,12 @@ def main() -> int:
         with open(public_key, "wb") as fh:
             run(["gpg", "--export", "--armor", signing_key], stdout=fh)
 
-    if not publish_files:
-        log("no packages were built; nothing to publish")
-    else:
+    if publish_files:
         log(f"prepared {len(publish_files)} package(s) for publishing")
+    elif remove:
+        log("no packages built; updated the database for removals")
+    else:
+        log("no packages were built; nothing to publish")
     return 0
 
 

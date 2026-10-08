@@ -135,11 +135,20 @@ def main() -> int:
 
     ensure_release(args.repo, tag, args.dry_run)
 
-    # Everything except the working .db.tar.gz (only .db is served).
+    # Everything except repo-add's working files (.db.tar.gz / .files*);
+    # only the `<name>.db` and its signature are served.
+    working = {
+        f"{repo_name}.db.tar.gz",
+        f"{repo_name}.db.tar.gz.sig",
+        f"{repo_name}.files.tar.gz",
+        f"{repo_name}.files",
+        f"{repo_name}.files.sig",
+        f"{repo_name}.files.tar.gz.sig",
+    }
     all_files = sorted(
         os.path.join(args.repo_dir, f)
         for f in os.listdir(args.repo_dir)
-        if f != f"{repo_name}.db.tar.gz"
+        if f not in working
     )
     db_files = [f for f in all_files if os.path.basename(f) in (f"{repo_name}.db", f"{repo_name}.db.sig")]
     payload = [f for f in all_files if f not in db_files]

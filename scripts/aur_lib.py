@@ -395,6 +395,7 @@ def resolve(client: AurClient, pacman: Pacman, targets: list[str], run_checks: b
     name_index: dict[str, str] = {}  # pkgname/provides -> pkgbase
     queue: deque[str] = deque(targets)
     seen: set[str] = set()
+    unresolved: list[str] = []
 
     while queue:
         pkgbase = queue.popleft()
@@ -405,6 +406,7 @@ def resolve(client: AurClient, pacman: Pacman, targets: list[str], run_checks: b
             node = parse_srcinfo(client.srcinfo(pkgbase))
         except NotFound:
             log(f"warning: .SRCINFO for '{pkgbase}' not found, skipping")
+            unresolved.append(pkgbase)
             continue
         nodes[pkgbase] = node
         name_index.setdefault(pkgbase, pkgbase)
@@ -416,22 +418,23 @@ def resolve(client: AurClient, pacman: Pacman, targets: list[str], run_checks: b
         deps = list(node["depends"]) + list(node["makedepends"])
         if run_checks:
             deps += list(node["checkdepends"])
-        unresolved: list[str] = []
+        unresolved_deps: list[str] = []
         for dep in deps:
             name = dep_name(dep)
             if not name or name in name_index:
                 continue
             if pacman.is_official(name):
                 continue
-            unresolved.append(name)
-        unresolved = list(dict.fromkeys(unresolved))
-        if not unresolved:
+            unresolved_deps.append(name)
+        unresolved_deps = list(dict.fromkeys(unresolved_deps))
+        if not unresolved_deps:
             continue
-        for name, provider in client.pkgbase_for_dependencies(unresolved).items():
+        for name, provider in client.pkgbase_for_dependencies(unresolved_deps).items():
             if provider and provider not in seen:
                 queue.append(provider)
             elif not provider:
                 log(f"warning: cannot resolve dependency '{name}' (needed by {pkgbase})")
+                unresolved.append(name)
 
     # Build edges used for ordering (a provider must be built before the
     # package that depends on it).
@@ -455,6 +458,7 @@ def resolve(client: AurClient, pacman: Pacman, targets: list[str], run_checks: b
 
     return {
         "order": order,
+        "unresolved": sorted(set(unresolved)),
         "nodes": {
             pkgbase: {
                 **node,

@@ -111,16 +111,16 @@ def main() -> int:
         }
     if wanted and unmatched:
         log(f"warning: filter entries not found in configuration: {', '.join(sorted(unmatched))}")
-    if not targets:
-        log("nothing to do: no packages selected")
-        _write_outputs([], repo_name)
-        _write_plan(args.out, repo_name, [], [], {}, cfg)
-        return 0
 
-    log(f"resolving AUR dependencies for: {', '.join(targets)}")
-    graph = resolve(client, pacman, targets, run_checks=build_opts["run_checks"])
-    nodes = graph["nodes"]
-    order = graph["order"]
+    if targets:
+        log(f"resolving AUR dependencies for: {', '.join(targets)}")
+        graph = resolve(client, pacman, targets, run_checks=build_opts["run_checks"])
+        nodes = graph["nodes"]
+        order = graph["order"]
+        unresolved = graph.get("unresolved", [])
+    else:
+        log("no packages selected; the repository will be emptied")
+        nodes, order, unresolved = {}, [], []
     target_set = {pb for pb in targets if pb in nodes}
 
     build: list[str] = []
@@ -181,6 +181,19 @@ def main() -> int:
             "install_files": [] if pkgbase in set(build) else db_filenames_for(db, node),
         }
 
+    # A package that was removed from packages.toml (or that is no longer a
+    # dependency of anything) should disappear from the repository.  Only do
+    # this when the dependency graph resolved cleanly, otherwise a transient
+    # AUR/network failure could wipe out packages that are still wanted.
+    managed = {name for node in nodes.values() for name in node["pkgnames"]}
+    remove: list[str] = []
+    if db:
+        if unresolved:
+            log("warning: skipping package removal because some dependencies could not "
+                f"be resolved: {', '.join(unresolved)}")
+        else:
+            remove = sorted(name for name in db if name not in managed)
+
     log("build plan:")
     if not build:
         log("  (everything is up to date)")
@@ -190,20 +203,23 @@ def main() -> int:
         detail = reasons.get(pkgbase, "up to date")
         pub = "publish" if node["publish"] else "build-only"
         log(f"  [{marker}] {pkgbase:28} {node['version']:24} {pub:10} {detail}")
+    if remove:
+        log("remove from repository: " + ", ".join(remove))
 
-    _write_plan(args.out, repo_name, order, build, plan_nodes, cfg)
-    _write_outputs(build, repo_name)
+    _write_plan(args.out, repo_name, order, build, plan_nodes, cfg, remove)
+    _write_outputs(build, remove, repo_name)
     return 0
 
 
 def _write_plan(path: str, repo_name: str, order: list[str], build: list[str],
-                nodes: dict, cfg: dict) -> None:
+                nodes: dict, cfg: dict, remove: list[str]) -> None:
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(
             {
                 "repo": cfg["repo"],
                 "order": order,
                 "build": build,
+                "remove": remove,
                 "nodes": nodes,
             },
             fh,
@@ -213,13 +229,14 @@ def _write_plan(path: str, repo_name: str, order: list[str], build: list[str],
     log(f"wrote {path}")
 
 
-def _write_outputs(build: list[str], repo_name: str) -> None:
+def _write_outputs(build: list[str], remove: list[str], repo_name: str) -> None:
     output = os.environ.get("GITHUB_OUTPUT")
     if not output:
         return
     with open(output, "a", encoding="utf-8") as fh:
-        fh.write(f"has_build={'true' if build else 'false'}\n")
+        fh.write(f"has_work={'true' if (build or remove) else 'false'}\n")
         fh.write(f"build_list={' '.join(build)}\n")
+        fh.write(f"remove_list={' '.join(remove)}\n")
         fh.write(f"repo_name={repo_name}\n")
 
 
