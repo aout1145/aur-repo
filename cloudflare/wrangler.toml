@@ -20,6 +20,9 @@ workers_dev = false
 GITHUB_REPO = "aout1145/aur-repo"
 # Must match `[repo].tag` in packages.toml.
 RELEASE_TAG = "repo"
+# Must match `[repo].name` + ".db" in packages.toml.  Only this database (and
+# its .sig) is served; any other .db file is rejected.
+DB_NAME = "aout.db"
 
 # Optional: serve from a custom domain on a zone in your Cloudflare account
 # instead of the workers.dev URL.

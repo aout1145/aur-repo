@@ -1,45 +1,70 @@
-// Cloudflare Worker that fronts a pacman repository stored as GitHub release
-// assets, adding a stable URL and edge caching.
+// Cloudflare Worker that fronts the pacman repository stored as GitHub release
+// assets.
 //
-// Every request `/<file>` is mapped to
-//   https://github.com/<GITHUB_REPO>/releases/download/<RELEASE_TAG>/<file>
-// GitHub redirects that to its object storage, which the Worker follows.  The
-// result is cached at the edge: package files are immutable and cached for a
-// year, while the repository database is cached only briefly.
+// SECURITY: this is intentionally NOT an open proxy.  Only these paths are
+// served:
+//   * the repository database           <DB_NAME> and <DB_NAME>.sig
+//   * package files and signatures      *.pkg.tar.<ext> [.sig]
+//   * the repository public key         repo.gpg
+// Everything else returns 404, so the domain cannot be used to proxy arbitrary
+// content (which could get it flagged for phishing).
 //
-// Configure GITHUB_REPO and RELEASE_TAG in wrangler.toml (or via --var).
+// Package files are immutable and cached at the edge for a year; the database
+// and the public key are always fetched fresh so a database is never served
+// with a mismatched signature.
+//
+// Configure GITHUB_REPO, RELEASE_TAG and DB_NAME in wrangler.toml (or --var).
+
+const PACKAGE_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]*\.pkg\.tar\.[A-Za-z0-9]+$/;
+const PACKAGE_SIG_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]*\.pkg\.tar\.[A-Za-z0-9]+\.sig$/;
+const DB_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]*\.db$/;
+
+function isAllowed(path, dbName) {
+  // Flat layout only: reject subdirectories and any traversal.
+  if (!path || path.includes("/") || path.includes("\\")) {
+    return false;
+  }
+
+  if (path === "repo.gpg") {
+    return true;
+  }
+
+  if (dbName) {
+    if (path === dbName || path === dbName + ".sig") {
+      return true;
+    }
+  } else if (DB_RE.test(path) || (path.endsWith(".sig") && DB_RE.test(path.slice(0, -4)))) {
+    return true;
+  }
+
+  return PACKAGE_RE.test(path) || PACKAGE_SIG_RE.test(path);
+}
 
 function isImmutable(path) {
-  return (
-    /\.pkg\.tar\.(zst|xz|gz|bz2|lz4|lzo|lz)$/.test(path) ||
-    /\.pkg\.tar\.[^.]+\.sig$/.test(path)
-  );
+  return PACKAGE_RE.test(path) || PACKAGE_SIG_RE.test(path);
 }
 
 export default {
   async fetch(request, env, ctx) {
-    const url = new URL(request.url);
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      return new Response("method not allowed\n", { status: 405 });
+    }
+
     let path;
     try {
-      path = decodeURIComponent(url.pathname).replace(/^\/+/, "");
+      path = decodeURIComponent(new URL(request.url).pathname).replace(/^\/+/, "");
     } catch {
       return new Response("bad request\n", { status: 400 });
     }
 
-    if (path === "") {
-      return new Response("AUR repository proxy\n", { status: 200 });
-    }
-    if (path.includes("..")) {
-      return new Response("bad request\n", { status: 400 });
-    }
-    if (request.method !== "GET" && request.method !== "HEAD") {
-      return new Response("method not allowed\n", { status: 405 });
+    if (!isAllowed(path, env.DB_NAME)) {
+      return new Response("not found\n", { status: 404 });
     }
 
     const immutable = isImmutable(path);
     const hasRange = request.headers.has("range");
     const cache = caches.default;
-    const cacheKey = new Request(url.toString(), { method: "GET" });
+    const cacheKey = new Request(new URL(request.url).toString(), { method: "GET" });
 
     if (request.method === "GET" && !hasRange) {
       const cached = await cache.match(cacheKey);
@@ -65,9 +90,7 @@ export default {
     const outHeaders = new Headers(origin.headers);
     outHeaders.set(
       "Cache-Control",
-      immutable
-        ? "public, max-age=31536000, immutable"
-        : "no-store",
+      immutable ? "public, max-age=31536000, immutable" : "no-store",
     );
     outHeaders.delete("set-cookie");
 

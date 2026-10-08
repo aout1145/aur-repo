@@ -181,11 +181,21 @@ sudo pacman -S <包名>
 缓存在 Cloudflare 边缘。包文件是**不可变**的，缓存一年；数据库和公钥不缓存，始终回源，
 避免数据库与签名不一致。
 
+> **这不是开放代理。** Worker 只允许下列路径，其它一律返回 `404`，避免被用作任意内容的
+> 代理（网络钓鱼等）：
+> - 仓库数据库 `<DB_NAME>` 及其签名 `<DB_NAME>.sig`（`DB_NAME` 需与 `packages.toml` 的
+>   `[repo].name` + `.db` 一致，例如 `aout.db`）
+> - 包文件 `*.pkg.tar.<ext>` 及其签名 `*.pkg.tar.<ext>.sig`
+> - 公钥 `repo.gpg`
+>
+> 只允许平铺的文件名，含 `/` 或路径穿越的请求会被拒绝。
+
 ### 部署方式一：本地 wrangler
 
 ```bash
 cd cloudflare
-# 编辑 wrangler.toml：把 GITHUB_REPO 改成你的 owner/repo，RELEASE_TAG 与 packages.toml 一致
+# 编辑 wrangler.toml：GITHUB_REPO 改成你的 owner/repo，RELEASE_TAG 与
+# packages.toml 的 [repo].tag 一致，DB_NAME 与 [repo].name + ".db" 一致
 npx wrangler deploy
 ```
 
