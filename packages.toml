@@ -1,0 +1,64 @@
+# ---------------------------------------------------------------------------
+# AUR package list for the automatic repository builder.
+#
+# Only packages listed in `packages` are treated as "targets".  Their AUR
+# dependencies (including dependencies that live only in the AUR) are resolved
+# recursively and built in the correct order.  Every package in the resolved
+# graph is published, so the repository stays self-contained.
+#
+# This is a TOML file, read with Python's built-in `tomllib` (no extra
+# dependencies).
+#
+# NOTE: `packages` is a top-level key, so it must appear before the first
+# `[table]` header below.
+# ---------------------------------------------------------------------------
+
+# The AUR packages (package names or pkgbase names) to build and keep up to
+# date in the repository.
+packages = [
+  "paru",
+  "aurutils",
+  # "mpv-full-git",   # example: automatically pulls in the AUR dep ffmpeg-git
+]
+
+[repo]
+# Base name of the pacman database.  With `name = "custom"` clients add a
+# `[custom]` section to pacman.conf and the file published to storage is
+# `custom.db`.
+name = "custom"
+
+# Architecture to build for.  GitHub's runners are x86_64.
+arch = "x86_64"
+
+# When a package is rebuilt, remove older package files from the object store
+# so the bucket does not grow forever.  The R2 token needs delete permission.
+# Off by default.
+remove_old = false
+
+[build]
+# Run the PKGBUILD `check()` function.  Enabling this also pulls in AUR
+# `checkdepends`, so leave it off unless you really want to run test suites.
+run_checks = false
+
+# Rebuild a package when one of its AUR dependencies was rebuilt in the same
+# run (useful for shared libraries).  Off by default so that scheduled runs
+# never rebuild more than necessary.
+rebuild_dependents = false
+
+# Rebuild VCS packages (source URLs like `git+https://...`) on every run.
+# VCS versions cannot be compared against the published version, so they are
+# only rebuilt when this is enabled or when a run is forced.  Prefer enabling
+# this per package via `[overrides.<name>]` or the `update_vcs` workflow input.
+update_vcs = false
+
+# ---------------------------------------------------------------------------
+# Optional per-package overrides.  The key is the package (base) name exactly
+# as it appears in `packages`.
+# ---------------------------------------------------------------------------
+# [overrides.some-daemon-git]
+# vcs = true          # override VCS auto-detection (bool)
+# update_vcs = true   # always rebuild this VCS package (bool)
+# skip_check = true   # never run check() for this package (bool)
+#
+# [overrides.spotify]
+# skip_check = true

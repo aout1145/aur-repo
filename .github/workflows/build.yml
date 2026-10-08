@@ -1,0 +1,137 @@
+name: Build AUR repository
+
+# The repository is only ever *updated on demand*:
+#   * manually, via "Run workflow"
+#   * when the package list or the CI scripts change
+#   * on a schedule, where each package's published version is compared with
+#     its AUR version and only genuinely older packages are rebuilt
+# Nothing is rebuilt unconditionally.
+on:
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: "Space/comma separated subset of configured packages (empty = all)"
+        required: false
+        default: ""
+      force:
+        description: "Rebuild the selected packages even if they are up to date"
+        type: boolean
+        default: false
+      update_vcs:
+        description: "Also rebuild VCS packages (…-git, …-svn, …)"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - packages.toml
+      - scripts/**
+      - .github/workflows/build.yml
+  schedule:
+    # Daily check.  This is *not* a blind rebuild: the plan job compares the
+    # AUR version of every configured package with the version already in the
+    # object store and only rebuilds what actually changed.
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+# Never let two runs write to the same repository database at once.
+concurrency:
+  group: aur-build
+  cancel-in-progress: false
+
+defaults:
+  run:
+    # The build scripts use bash arrays; make sure bash is used in the
+    # Arch container.
+    shell: bash
+
+env:
+  # rclone is configured entirely through environment variables.
+  RCLONE_CONFIG_R2_TYPE: s3
+  RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+  RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+  RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+  RCLONE_CONFIG_R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+  RCLONE_CONFIG_R2_REGION: auto
+  # Remote directory that holds the repository (db + packages).  The remote
+  # name must match the RCLONE_CONFIG_<NAME>_* variables above (R2).
+  R2_PATH: R2:${{ vars.R2_BUCKET }}/${{ vars.R2_PREFIX }}
+  # Optional package signing.
+  GPG_KEY: ${{ secrets.GPG_KEY }}
+  GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+  GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+  # Cache of .SRCINFO files fetched from the AUR.
+  AUR_CACHE: ${{ github.workspace }}/.cache/aur
+  BUILDER_USER: builder
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    outputs:
+      has_build: ${{ steps.plan.outputs.has_build }}
+      build_list: ${{ steps.plan.outputs.build_list }}
+    steps:
+      # git must be installed before actions/checkout can run inside the
+      # Arch container.
+      - name: Install prerequisites
+        run: pacman -Syu --noconfirm --needed git python rclone libarchive
+      - uses: actions/checkout@v4
+      - name: Cache AUR metadata
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.cache/aur
+          key: aur-srcinfo-${{ hashFiles('packages.toml', 'scripts/**') }}
+          restore-keys: aur-srcinfo-
+      - name: Plan builds
+        id: plan
+        run: |
+          args=(--config packages.toml --out plan.json)
+          if [ "${{ inputs.force }}" = "true" ]; then args+=(--force); fi
+          if [ "${{ inputs.update_vcs }}" = "true" ]; then args+=(--update-vcs); fi
+          args+=(--packages "${{ inputs.packages }}")
+          python3 scripts/plan.py "${args[@]}"
+      - name: Upload plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: plan
+          path: plan.json
+          if-no-files-found: error
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.has_build == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install prerequisites
+        run: pacman -Syu --noconfirm --needed git python rclone libarchive gnupg sudo
+      - uses: actions/checkout@v4
+      - name: Create unprivileged build user
+        run: |
+          useradd -m -G wheel builder 2>/dev/null || true
+          printf 'builder ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/builder
+          chmod 0440 /etc/sudoers.d/builder
+      - name: Cache pacman packages
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/pacman/pkg
+          key: pacman-${{ hashFiles('packages.toml') }}
+      - name: Cache AUR metadata
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.cache/aur
+          key: aur-srcinfo-${{ hashFiles('packages.toml', 'scripts/**') }}
+          restore-keys: aur-srcinfo-
+      - name: Download plan
+        uses: actions/download-artifact@v4
+        with:
+          name: plan
+      - name: Build packages
+        run: python3 scripts/build.py --config packages.toml --plan plan.json --repo-dir public --work-dir work
+      - name: Publish repository
+        run: python3 scripts/publish.py --config packages.toml --repo-dir public

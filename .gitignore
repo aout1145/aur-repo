@@ -1,0 +1,12 @@
+# Build output / transient state
+/work/
+/public/
+/downloads/
+/state/
+/plan.json
+/published.db
+/.cache/
+
+# Python
+__pycache__/
+*.py[cod]
