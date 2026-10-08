@@ -9,8 +9,15 @@ release download directory directly as its ``Server``:
 
 or, when fronted by the bundled Cloudflare Worker, a single custom domain.
 
-Package files are uploaded before the database so that a failed upload cannot
-leave a database that references packages that were never uploaded.
+The update is done in a safe order:
+
+  1. every package file (and ``repo.gpg``) is uploaded first;
+  2. the database (``<name>.db`` and its signature) is replaced last, and the
+     previous database is restored if that replacement fails.
+
+A build failure never reaches this script, so a failed build leaves the release
+untouched.  Even if this script fails part-way, the database still points at
+packages that are actually present, so clients stay consistent.
 """
 
 from __future__ import annotations
@@ -18,7 +25,9 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import os
+import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -65,6 +74,39 @@ def upload(repo: str, tag: str, files: list[str], dry_run: bool) -> None:
             ["gh", "release", "upload", tag, *batch, "--repo", repo, "--clobber"],
             dry_run=dry_run,
         )
+
+
+def download_asset(repo: str, tag: str, name: str, directory: str) -> bool:
+    proc = run(
+        ["gh", "release", "download", tag, "--repo", repo, "--pattern", name,
+         "--dir", directory, "--clobber"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return proc.returncode == 0 and os.path.exists(os.path.join(directory, name))
+
+
+def replace_database(repo: str, tag: str, db_files: list[str], dry_run: bool) -> None:
+    """Replace the published database, restoring the old one on failure."""
+    if not db_files:
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        backups: list[str] = []
+        for path in db_files:
+            name = os.path.basename(path)
+            if download_asset(repo, tag, name, tmp):
+                backups.append(os.path.join(tmp, name))
+        try:
+            upload(repo, tag, db_files, dry_run)
+        except subprocess.CalledProcessError:
+            log("error: database upload failed; restoring the previous database")
+            if backups:
+                try:
+                    upload(repo, tag, backups, dry_run)
+                except subprocess.CalledProcessError:
+                    log("error: could not restore the previous database")
+            raise
 
 
 def release_assets(repo: str, tag: str) -> list[tuple[str, str]]:
@@ -153,9 +195,9 @@ def main() -> int:
     db_files = [f for f in all_files if os.path.basename(f) in (f"{repo_name}.db", f"{repo_name}.db.sig")]
     payload = [f for f in all_files if f not in db_files]
 
-    # Packages and the public key first, the database last.
+    # 1) Packages and the public key first, 2) the database last (atomically).
     upload(args.repo, tag, payload, args.dry_run)
-    upload(args.repo, tag, db_files, args.dry_run)
+    replace_database(args.repo, tag, db_files, args.dry_run)
 
     if cfg["repo"].get("remove_old"):
         prune(args.repo, tag, args.repo_dir, repo_name, args.dry_run)

@@ -123,5 +123,30 @@ jobs:
           name: plan
       - name: Build packages
         run: python3 scripts/build.py --config packages.toml --plan plan.json --repo-dir public --work-dir work
+      - name: Save build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: repo
+          path: public
+          if-no-files-found: error
+
+  # Publishing runs in a separate job that only starts after *every* build in
+  # the build job succeeded.  If any package fails to build, the build job
+  # fails and this job never runs, so the GitHub release is left completely
+  # untouched.
+  publish:
+    needs: [plan, build]
+    if: needs.plan.outputs.has_work == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install prerequisites
+        run: pacman -Syu --noconfirm --needed git python github-cli libarchive
+      - uses: actions/checkout@v4
+      - name: Download build output
+        uses: actions/download-artifact@v4
+        with:
+          name: repo
       - name: Publish to GitHub release
         run: python3 scripts/publish.py --config packages.toml --repo-dir public
