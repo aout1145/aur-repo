@@ -19,7 +19,6 @@ packages = [
   "cpeditor",
   "cpeditor-bin",
   "bibata-cursor-theme",
-  "github-desktop",
   "gnome-rounded-blur",
   "gnome-shell-extension-arch-update",
   "gnome-shell-extension-bing-wallpaper",
