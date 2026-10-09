@@ -16,7 +16,17 @@
 # The AUR packages (package names or pkgbase names) to build and keep up to
 # date in the repository.
 packages = [
+  "cpeditor",
   "cpeditor-bin",
+  "bibata-cursor-theme",
+  "github-desktop",
+  "gnome-rounded-blur",
+  "gnome-shell-extension-arch-update",
+  "gnome-shell-extension-bing-wallpaper",
+  "gnome-shell-extension-blur-my-shell",
+  "moekoemusic-bin",
+  "motrix-next-bin",
+  "visual-studio-code-bin",
 ]
 
 [repo]
