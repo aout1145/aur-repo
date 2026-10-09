@@ -59,10 +59,10 @@ run_checks = false
 # rebuild more than necessary.
 rebuild_dependents = false
 
-# Rebuild VCS packages (source URLs like `git+https://...`) on every run.  VCS
-# versions cannot be compared with the published one, so they are only rebuilt
-# when this is enabled or the run is forced.  Can also be enabled per package
-# below.
+# Rebuild VCS packages (PKGBUILDs with a `pkgver()` function, e.g. `…-git`) on
+# every run.  Their version cannot be compared with the published one, so they
+# are only rebuilt when this is enabled or the run is forced.  Can also be
+# enabled per package below.
 update_vcs = true
 
 # Skip source PGP verification while building.

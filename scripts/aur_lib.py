@@ -39,6 +39,12 @@ AUR_GIT = "https://aur.archlinux.org"
 # version published in the repository.
 VCS_SCHEMES = ("git+", "svn+", "hg+", "bzr+", "darcs+", "cvs://")
 
+# A package is only "VCS" (dynamic version) when its PKGBUILD defines a
+# `pkgver()` function.  A git+ source pinned to a tag, or git sources that are
+# merely extra data, do not make a package dynamic (e.g. many
+# gnome-shell-extension-* packages use `git+...#tag=vNN` with a static pkgver).
+PKGVER_FUNC_RE = re.compile(r"(?m)^\s*(?:function\s+)?pkgver\s*(?:\(\s*\))?\s*\{")
+
 
 # Some environments advertise an IPv6 address but have no working IPv6 route.
 # urllib then blocks until the socket times out before retrying over IPv4,
@@ -135,6 +141,7 @@ class AurClient:
     def __init__(self) -> None:
         self._info_cache: dict[str, list[dict]] = {}
         self._src_cache: dict[str, str] = {}
+        self._pkgbuild_cache: dict[str, str] = {}
         self._pkgbase_cache: dict[str, str | None] = {}
 
     def info(self, names: list[str]) -> list[dict]:
@@ -175,6 +182,38 @@ class AurClient:
         if "pkgbase" not in text:
             raise NotFound(pkgbase)
         self._src_cache[pkgbase] = text
+        if cache_file:
+            try:
+                os.makedirs(cache_dir, exist_ok=True)
+                with open(cache_file, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+            except OSError:
+                pass
+        return text
+
+    def pkgbuild(self, pkgbase: str) -> str:
+        """Fetch the PKGBUILD (used to detect a `pkgver()` function)."""
+        if pkgbase in self._pkgbuild_cache:
+            return self._pkgbuild_cache[pkgbase]
+        cache_dir = os.environ.get("AUR_CACHE")
+        cache_file = os.path.join(cache_dir, f"{pkgbase}.PKGBUILD") if cache_dir else None
+        if cache_file and os.path.isfile(cache_file):
+            with open(cache_file, "r", encoding="utf-8") as fh:
+                text = fh.read()
+            if text.strip():
+                self._pkgbuild_cache[pkgbase] = text
+                return text
+        try:
+            text = http_get(
+                f"{AUR_CGIT}/PKGBUILD?h={urllib.parse.quote(pkgbase)}"
+            ).decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            raise NotFound(pkgbase) from exc
+        except RuntimeError as exc:
+            raise NotFound(pkgbase) from exc
+        if not text.strip():
+            raise NotFound(pkgbase)
+        self._pkgbuild_cache[pkgbase] = text
         if cache_file:
             try:
                 os.makedirs(cache_dir, exist_ok=True)
@@ -292,7 +331,7 @@ def parse_srcinfo(text: str) -> dict:
         "makedepends": get(base, "makedepends"),
         "checkdepends": get(base, "checkdepends"),
         "provides": provides,
-        "vcs": any(s.startswith(VCS_SCHEMES) for s in sources),
+        "vcs_source": any(s.startswith(VCS_SCHEMES) for s in sources),
     }
 
 
@@ -408,6 +447,13 @@ def resolve(client: AurClient, pacman: Pacman, targets: list[str], run_checks: b
             log(f"warning: .SRCINFO for '{pkgbase}' not found, skipping")
             unresolved.append(pkgbase)
             continue
+        # Only treat a package as VCS when its PKGBUILD defines pkgver().
+        node["vcs"] = node.get("vcs_source", False)
+        if node["vcs"]:
+            try:
+                node["vcs"] = bool(PKGVER_FUNC_RE.search(client.pkgbuild(pkgbase)))
+            except NotFound:
+                pass
         nodes[pkgbase] = node
         name_index.setdefault(pkgbase, pkgbase)
         for name in node["pkgnames"]:

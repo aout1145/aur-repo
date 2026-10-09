@@ -301,7 +301,8 @@ GitHub Release 附件名只允许字母、数字和 `. - _`。Arch 包文件名�
 
 - 未在仓库中 → 构建；
 - AUR 版本 > 已发布版本（`vercmp`）→ 构建；
-- VCS 包（源码 URL 形如 `git+…`）→ 默认不因版本比较而构建，只有开启 `update_vcs` 或 `force` 才构建；
+- VCS 包（PKGBUILD 里定义了 `pkgver()` 的，如 `…-git`）→ 默认不因版本比较而构建，只有开启
+  `update_vcs` 或 `force` 才构建；仅用 `git+…#tag=…` 拉取固定版本的包**不算** VCS。
 - 可选 `rebuild_dependents = true`：某个 AUR 依赖本次被重建时，一并重建依赖它的包。
 
 已发布版本来自 Release 上的 `<name>.db`，运行器是「无状态」的，不需要往仓库 commit 任何东西。
