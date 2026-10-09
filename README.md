@@ -243,8 +243,11 @@ npx wrangler deploy
      Zone Resources 设为包含目标域名所在的 zone。只用 `*.workers.dev` 时不需要。
 2. 仓库 Secrets 添加 `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`。
    注意 `CLOUDFLARE_ACCOUNT_ID` 必须是**拥有该 zone 的账户**。
-3. 手动运行 **Actions → Deploy Cloudflare repository proxy**。
-   （该 workflow 会自动把 `GITHUB_REPO` 注入为当前仓库。）
+3. 部署方式：手动运行 **Actions → Deploy Cloudflare repository proxy**，或修改
+   `cloudflare/` 下的文件并 push 到 `main`（会自动触发）。workflow 会自动把
+   `GITHUB_REPO` 注入为当前仓库。
+   自动部署由 `cloudflare/wrangler.toml` 的 `[deploy] auto`（默认 `true`）控制；设为
+   `false` 时 deploy job 会被跳过（只保留手动触发的入口，实际也不会执行）。
 
 > 最省事的方式是直接用 Cloudflare 的 **“Edit Cloudflare Workers”** Token 模板创建，
 > 并确认它包含上面的 Zone 权限。

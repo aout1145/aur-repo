@@ -26,6 +26,12 @@ DB_NAME = "aout.db"
 # Title shown as the homepage heading (and in the browser tab).
 TITLE = "aout's AUR Repository"
 
+# Read by the deploy workflow, not by the Worker: whether a push touching
+# cloudflare/ should automatically redeploy the Worker.  Set to false to only
+# deploy manually (the deploy workflow is then skipped).
+[deploy]
+auto = true
+
 # Optional: serve from a custom domain on a zone in your Cloudflare account
 # instead of the workers.dev URL.
 

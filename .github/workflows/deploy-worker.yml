@@ -1,7 +1,12 @@
 name: Deploy Cloudflare repository proxy
 
-# Manual only: run this after setting the CLOUDFLARE_API_TOKEN and
-# CLOUDFLARE_ACCOUNT_ID secrets.  It deploys cloudflare/worker.js.
+# Deploys cloudflare/worker.js (and wrangler.toml).
+#
+# Runs automatically when anything under cloudflare/ changes, and can also be
+# run manually.  Whether automatic deploys are enabled is controlled by
+# `[deploy] auto` in cloudflare/wrangler.toml (default true); when it is false
+# the deploy job is skipped.  Requires the CLOUDFLARE_API_TOKEN and
+# CLOUDFLARE_ACCOUNT_ID secrets.
 #
 # The API token needs:
 #   * Account -> Workers Scripts -> Edit
@@ -10,12 +15,36 @@ name: Deploy Cloudflare repository proxy
 #     "Zone Resources" and make sure it is in CLOUDFLARE_ACCOUNT_ID's account)
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - cloudflare/**
+      - .github/workflows/deploy-worker.yml
 
 permissions:
   contents: read
 
+concurrency:
+  group: deploy-worker
+  cancel-in-progress: true
+
 jobs:
+  # Reads cloudflare/wrangler.toml to decide whether to deploy.
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      auto: ${{ steps.flag.outputs.auto }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read auto-deploy flag
+        id: flag
+        run: |
+          auto=$(python3 -c "import tomllib,pathlib; print(str(tomllib.loads(pathlib.Path('cloudflare/wrangler.toml').read_text()).get('deploy', {}).get('auto', True)).lower())")
+          echo "auto=$auto" >> "$GITHUB_OUTPUT"
+
   deploy:
+    needs: check
+    if: needs.check.outputs.auto == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
