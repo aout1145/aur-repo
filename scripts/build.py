@@ -27,6 +27,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -45,6 +46,12 @@ from aur_lib import (  # noqa: E402
 
 AUR_GIT = "https://aur.archlinux.org"
 
+# makepkg config used for every build: it drops the `debug` option so that no
+# -debug packages are produced.  Anything that still slips through (a PKGBUILD
+# that explicitly enables debug) is filtered out below as well.
+MAKEPKG_CONF = "/tmp/makepkg-ci.conf"
+_DEBUG_FILE_RE = re.compile(r"-debug-.*\.pkg\.tar\.[A-Za-z0-9]+$")
+
 
 # ---------------------------------------------------------------------------
 # Privilege helpers
@@ -62,13 +69,27 @@ def makepkg_flags(node: dict, build_cfg: dict) -> list[str]:
     return flags
 
 
+def write_makepkg_conf(dry_run: bool) -> None:
+    """Write a makepkg config with the `debug` option removed."""
+    content = (
+        "source /etc/makepkg.conf\n"
+        "OPTIONS=($(printf '%s\\n' \"${OPTIONS[@]}\" | grep -vx debug))\n"
+    )
+    log(f"# writing {MAKEPKG_CONF} without the debug option")
+    if dry_run:
+        return
+    with open(MAKEPKG_CONF, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    os.chmod(MAKEPKG_CONF, 0o644)
+
+
 def run_makepkg(workdir: str, flags: list[str], builder_user: str | None, dry_run: bool) -> None:
     makepkg = _which("makepkg")
+    command = f"{makepkg} --config {shlex.quote(MAKEPKG_CONF)} {' '.join(flags)}"
     if is_root() and builder_user:
-        inner = f"cd {shlex.quote(workdir)} && {makepkg} {' '.join(flags)}"
-        cmd = ["sudo", "-u", builder_user, "-H", "bash", "-lc", inner]
+        cmd = ["sudo", "-u", builder_user, "-H", "bash", "-lc", f"cd {shlex.quote(workdir)} && {command}"]
     else:
-        cmd = ["bash", "-lc", f"cd {shlex.quote(workdir)} && {makepkg} {' '.join(flags)}"]
+        cmd = ["bash", "-lc", f"cd {shlex.quote(workdir)} && {command}"]
     run(cmd, dry_run=dry_run)
 
 
@@ -191,6 +212,9 @@ def main() -> int:
     os.makedirs(args.work_dir, exist_ok=True)
     os.makedirs(args.downloads_dir, exist_ok=True)
 
+    # Build without the `debug` option (no -debug packages).
+    write_makepkg_conf(args.dry_run)
+
     signing_key = os.environ.get("GPG_KEY", "")
     passphrase = os.environ.get("GPG_PASSPHRASE") or None
     if signing_key and os.environ.get("GPG_PRIVATE_KEY"):
@@ -249,10 +273,13 @@ def main() -> int:
                     run(["chown", "-R", f"{args.builder_user}:{args.builder_user}", workdir])
                 run_makepkg(workdir, makepkg_flags(node, build_cfg), args.builder_user, args.dry_run)
 
-                built = sorted(
+                built = [
                     p for p in glob.glob(os.path.join(workdir, "*.pkg.tar.*"))
-                    if not p.endswith(".sig")
-                )
+                    if not p.endswith(".sig") and not _DEBUG_FILE_RE.search(os.path.basename(p))
+                ]
+                for other in glob.glob(os.path.join(workdir, "*.pkg.tar.*")):
+                    if _DEBUG_FILE_RE.search(os.path.basename(other)):
+                        log(f"skipping debug package {os.path.basename(other)}")
                 if not built and not args.dry_run:
                     raise RuntimeError("build produced no packages")
                 built_files[pkgbase] = built
