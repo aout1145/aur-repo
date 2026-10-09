@@ -24,7 +24,6 @@ packages = [
   "gnome-shell-extension-blur-my-shell",
   "moekoemusic-bin",
   "motrix-next-bin",
-  "visual-studio-code-bin",
 ]
 
 # ---------------------------------------------------------------------------
