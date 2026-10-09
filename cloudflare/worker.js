@@ -289,6 +289,17 @@ export default {
     }
 
     const contentType = origin.headers.get("content-type") || "";
+
+    // A conditional request (pacman sends If-Modified-Since for the database)
+    // can make the origin answer 304 Not Modified.  Pass it through so the
+    // client keeps its cached copy; do not turn it into an error.
+    if (origin.status === 304) {
+      const headers = new Headers(origin.headers);
+      sanitizeHeaders(headers);
+      headers.set("Cache-Control", "no-store");
+      return new Response(null, { status: 304, headers });
+    }
+
     const ok = origin.status === 200 || origin.status === 206;
 
     // Never let a GitHub error page (or any HTML) reach the client.
