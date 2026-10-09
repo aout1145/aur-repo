@@ -567,3 +567,27 @@ def run(cmd: list[str], dry_run: bool = False, check: bool = True, **kwargs) -> 
 
 def gh_available() -> bool:
     return shutil.which("gh") is not None
+
+
+def gh_ensure_release(repo: str, tag: str, dry_run: bool = False) -> None:
+    """Make sure the release with ``tag`` exists (create it if needed)."""
+    proc = run(
+        ["gh", "release", "view", tag, "--repo", repo],
+        check=False,
+        capture_output=True,
+        text=True,
+        dry_run=dry_run,
+    )
+    if proc.returncode == 0:
+        return
+    log(f"creating release '{tag}'")
+    run(
+        [
+            "gh", "release", "create", tag,
+            "--repo", repo,
+            "--title", f"AUR repository ({tag})",
+            "--notes", "Binary packages published by the AUR build workflow.",
+            "--latest=false",
+        ],
+        dry_run=dry_run,
+    )

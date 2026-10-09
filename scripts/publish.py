@@ -24,15 +24,18 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import json
 import os
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from aur_lib import (  # noqa: E402
     gh_available,
+    gh_ensure_release,
     github_repo,
     load_config,
     load_db,
@@ -43,27 +46,37 @@ from aur_lib import (  # noqa: E402
 BATCH_SIZE = 40
 
 
-def ensure_release(repo: str, tag: str, dry_run: bool) -> None:
-    proc = run(
-        ["gh", "release", "view", tag, "--repo", repo],
-        check=False,
-        capture_output=True,
-        text=True,
-        dry_run=dry_run,
+def write_manifest(repo_dir: str, repo_name: str) -> str:
+    """Write ``packages.json`` (used by the Worker homepage) from the database."""
+    db_path = os.path.join(repo_dir, f"{repo_name}.db.tar.gz")
+    if not os.path.exists(db_path):
+        db_path = os.path.join(repo_dir, f"{repo_name}.db")
+    db = load_db(db_path)
+    packages = sorted(
+        (
+            {
+                "name": name,
+                "version": entry.get("VERSION", ""),
+                "filename": entry.get("FILENAME", ""),
+                "desc": entry.get("DESC", ""),
+                "arch": entry.get("ARCH", ""),
+            }
+            for name, entry in db.items()
+            if entry.get("FILENAME")
+        ),
+        key=lambda p: p["name"],
     )
-    if proc.returncode == 0:
-        return
-    log(f"creating release '{tag}'")
-    run(
-        [
-            "gh", "release", "create", tag,
-            "--repo", repo,
-            "--title", f"AUR repository ({tag})",
-            "--notes", "Binary packages published by the AUR build workflow.",
-            "--latest=false",
-        ],
-        dry_run=dry_run,
-    )
+    manifest = {
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "signed": bool(os.environ.get("GPG_KEY")),
+        "key_id": os.environ.get("GPG_KEY", ""),
+        "packages": packages,
+    }
+    path = os.path.join(repo_dir, "packages.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    return path
 
 
 def upload(repo: str, tag: str, files: list[str], dry_run: bool) -> None:
@@ -205,7 +218,11 @@ def main() -> int:
             return 0
         raise SystemExit(problem)
 
-    ensure_release(args.repo, tag, args.dry_run)
+    gh_ensure_release(args.repo, tag, args.dry_run)
+
+    # Regenerate the manifest used by the Worker homepage from the database we
+    # are about to publish, so it is uploaded together with the packages.
+    write_manifest(args.repo_dir, repo_name)
 
     # Everything except repo-add's working files (.db.tar.gz / .files*);
     # only the `<name>.db` and its signature are served.

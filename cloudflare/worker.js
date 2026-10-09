@@ -1,5 +1,5 @@
 // Cloudflare Worker that fronts the pacman repository stored as GitHub release
-// assets.
+// assets and renders a small homepage.
 //
 // SECURITY: this is intentionally NOT an open proxy.  Only these paths are
 // served:
@@ -9,14 +9,18 @@
 // Everything else returns 404, so the domain cannot be used to proxy arbitrary
 // content (which could get it flagged for phishing).
 //
-// The Worker also *never* passes through a GitHub page.  If the asset does not
-// exist (GitHub returns its own HTML 404) or the upstream response is anything
-// other than a real file, a minimal plain-text error is returned instead, and
-// GitHub/Fastly identifying headers are stripped from successful responses.
+// The Worker also *never* passes through a GitHub page: if the asset does not
+// exist (GitHub answers with its own HTML 404) or the upstream response is
+// anything other than a real file, a minimal plain-text error is returned
+// instead, and GitHub/Fastly identifying headers are stripped.
+//
+// `/` is rendered by the Worker itself (never proxied).  The static parts of
+// the page (layout, CSS, install instructions) are hardcoded below; only the
+// package list (packages.json) and the last-run status (status.json) are read
+// from the release.
 //
 // Package files are immutable and cached at the edge for a year; the database
-// and the public key are always fetched fresh so a database is never served
-// with a mismatched signature.
+// and the public key are always fetched fresh.
 //
 // Configure GITHUB_REPO, RELEASE_TAG and DB_NAME in wrangler.toml (or --var).
 
@@ -81,6 +85,150 @@ function sanitizeHeaders(headers) {
   }
 }
 
+function esc(value) {
+  return String(value).replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
+// Fetch a JSON asset from the release.  Returns the text, or null if it is
+// missing or is not a plain data response (never returns a GitHub HTML page).
+async function releaseAssetText(env, name) {
+  const url =
+    `https://github.com/${env.GITHUB_REPO}/releases/download/` +
+    `${env.RELEASE_TAG}/${name}`;
+  try {
+    const res = await fetch(url, {
+      redirect: "follow",
+      headers: { "user-agent": "aur-homepage" },
+    });
+    if (!res.ok || (res.headers.get("content-type") || "").includes("text/html")) {
+      return null;
+    }
+    return await res.text();
+  } catch {
+    return null;
+  }
+}
+
+function homePage({ origin, section, packages, signed, keyId, generatedAt, status }) {
+  const conf =
+    `[${section}]\n` +
+    `SigLevel = ${signed ? "Required DatabaseOptional" : "Optional TrustAll"}\n` +
+    `Server = ${origin}`;
+
+  const keySteps = signed
+    ? `<p>导入签名密钥：</p><pre>curl -fsSL ${esc(origin)}/repo.gpg -o /tmp/repo.gpg
+sudo pacman-key --add /tmp/repo.gpg
+sudo pacman-key --lsign-key ${esc(keyId || "<KEYID>")}</pre>`
+    : "";
+
+  const files = packages.length
+    ? packages.map((p) => {
+        const href = `${esc(origin)}/${esc(p.filename)}`;
+        return `<li><a href="${href}">${esc(p.filename)}</a></li>`;
+      }).join("\n")
+    : "<li>暂无软件包</li>";
+
+  let statusLine = "状态未知";
+  if (status) {
+    const label = status.conclusion === "success"
+      ? "成功"
+      : status.conclusion === "failure" ? "失败" : esc(status.conclusion || "未知");
+    const changed = status.changed === false ? "（无变更）" : "";
+    const link = status.run_url ? ` · <a href="${esc(status.run_url)}">日志</a>` : "";
+    statusLine =
+      `最近一次更新：${esc(status.last_run_at || "?")} — ${esc(label)}${changed}${link}`;
+  }
+  const lastSuccess = generatedAt ? `<br>最近一次成功发布：${esc(generatedAt)}` : "";
+
+  return `<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>${esc(section)} — AUR 包仓库</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:52rem;margin:2rem auto;padding:0 1rem;line-height:1.5}
+pre{background:#f4f4f4;padding:.6rem .8rem;overflow-x:auto}
+ul{padding-left:1.2rem}
+small{color:#666}
+</style>
+</head>
+<body>
+<h1>${esc(section)} — AUR 包仓库</h1>
+<h2>添加到 pacman</h2>
+<pre>${esc(conf)}</pre>
+${keySteps}
+<h2>软件包 (${packages.length})</h2>
+<ul>
+${files}
+</ul>
+<p><small>${statusLine}${lastSuccess}</small></p>
+</body>
+</html>`;
+}
+
+async function renderHome(request, env, ctx) {
+  if (request.method === "HEAD") {
+    return new Response(null, {
+      headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=60" },
+    });
+  }
+
+  const origin = new URL(request.url).origin;
+  const section = (env.DB_NAME || "repo.db").replace(/\.db$/, "");
+
+  const cache = caches.default;
+  const cacheKey = new Request(origin + "/", { method: "GET" });
+  const cached = await cache.match(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const [pkgText, statusText] = await Promise.all([
+    releaseAssetText(env, "packages.json"),
+    releaseAssetText(env, "status.json"),
+  ]);
+
+  let packages = [];
+  let signed = false;
+  let keyId = "";
+  let generatedAt = "";
+  if (pkgText) {
+    try {
+      const data = JSON.parse(pkgText);
+      packages = Array.isArray(data.packages) ? data.packages : [];
+      signed = !!data.signed;
+      keyId = data.key_id || "";
+      generatedAt = data.generated_at || "";
+    } catch {
+      // ignore malformed manifest
+    }
+  }
+
+  let status = null;
+  if (statusText) {
+    try {
+      status = JSON.parse(statusText);
+    } catch {
+      // ignore malformed status
+    }
+  }
+
+  const html = homePage({ origin, section, packages, signed, keyId, generatedAt, status });
+  const response = new Response(html, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "public, max-age=60",
+      "x-content-type-options": "nosniff",
+    },
+  });
+  ctx.waitUntil(cache.put(cacheKey, response.clone()).catch(() => {}));
+  return response;
+}
+
 export default {
   async fetch(request, env, ctx) {
     if (request.method !== "GET" && request.method !== "HEAD") {
@@ -92,6 +240,11 @@ export default {
       path = decodeURIComponent(new URL(request.url).pathname).replace(/^\/+/, "");
     } catch {
       return errorResponse(400, "bad request");
+    }
+
+    // The homepage is rendered here, never proxied.
+    if (path === "" || path === "index.html") {
+      return renderHome(request, env, ctx);
     }
 
     if (!isAllowed(path, env.DB_NAME)) {

@@ -25,14 +25,15 @@
 | --- | --- |
 | `plan` | 从 Release 下载已发布的仓库数据库，解析 `packages.toml` 中所有包（含递归 AUR 依赖）的版本，和已发布版本比较，决定要构建 / 移除哪些包，输出 `plan.json`。 |
 | `build` | 按依赖顺序构建（`makepkg`），把构建出的包安装进容器供后续依赖使用，重命名包文件、在本地组装仓库数据库，并把结果作为 Actions 工件保存。**此阶段不接触 Release。** |
-| `publish` | 依赖 `build`，只有在 **build job 全部成功** 后才运行；把包先上传、数据库最后替换（替换失败会回滚）。 |
+| `publish` | `if: always()`。仅当 **build 成功** 时才执行发布步骤：传包、生成 `packages.json`、最后替换数据库（失败会回滚）；随后无论成败都用一个 `if: always()` 的步骤把本次运行结果写入 `status.json`。 |
 
 ### 原子更新
 
-- 任何包构建失败 → `build` job 失败 → `publish` job 不会启动，**GitHub Release 完全不变**。
-- `publish` 内部也按安全顺序执行：先上传所有包文件和 `repo.gpg`，最后才替换 `<name>.db` 及其签名。
+- 任何包构建失败 → `build` job 失败 → `publish` 里的发布步骤被跳过，**仓库内容（包、数据库、`packages.json`）一个字节都不变**。
+- 发布内部也按安全顺序执行：先上传所有包文件和 `repo.gpg`，最后才替换 `<name>.db` 及其签名。
   即使上传中途失败，数据库仍指向真实存在的包；替换数据库失败时脚本会用事先下载的旧数据库回滚。
-- 因此要么整体更新成功，要么仓库保持一致状态，不会出现「数据库引用了不存在的包」。
+- 唯一的例外是 `status.json`：状态步骤总是执行，这样主页才能显示“最近一次更新失败”。
+  它只碰这一个状态文件，不影响仓库内容。
 
 **触发方式（都不会无条件重建）：**
 
@@ -194,6 +195,27 @@ sudo pacman -S <包名>
 > Worker 也**不会透传 GitHub 的页面**：请求的文件不存在时返回自己的纯文本 `404`（不会出现
 > GitHub 的 404 页面）；上游返回 403/5xx 时返回 `502`；并会剥离 `x-github-*`、`x-fastly-*`、
 > `via`、`server` 等来源标识头。
+>
+> `/` 由 Worker 自己渲染主页，不经过代理白名单；主页的模板/样式/安装说明都写死在
+> `worker.js` 里，只有包列表和运行状态是从 Release 读取的。
+
+### 主页
+
+访问 `https://aur.aout.top/` 会看到一个极简主页，显示：
+
+- 如何添加仓库到 `pacman.conf`（仓库段名由 `DB_NAME` 推导，`Server` 用当前访问的域名）；
+- 是否启用签名：已签名时显示 `SigLevel = Required DatabaseOptional` 和导入 `repo.gpg` 的步骤
+  （含 `pacman-key --lsign-key <key_id>`），未签名则显示 `SigLevel = Optional TrustAll`；
+- 软件包列表：每个包显示**完整包文件名**，并作为超链接直接指向下载地址
+  （`https://<域名>/<filename>`），同时显示包数量；
+- 最近一次更新的时间与结果（成功/失败，附 CI 日志链接）和最近一次成功发布时间。
+
+数据来自同一 Release 下的两个小文件：
+
+| 文件 | 写入者 | 内容 |
+| --- | --- | --- |
+| `packages.json` | `publish.py`（成功时） | 包列表、`signed`、`key_id`、生成时间 |
+| `status.json` | `status.py`（每次都写，含失败） | 本次运行的结论、时间、日志链接 |
 
 ### 部署方式一：本地 wrangler
 
@@ -278,7 +300,8 @@ CI 会用该密钥对每个软件包和数据库做分离签名，并发布 `rep
     ├── aur_lib.py                # AUR 客户端、依赖解析、仓库数据库读取、版本比较、文件名清洗
     ├── plan.py                   # 生成构建计划（决定重建哪些包）
     ├── build.py                  # 按依赖顺序构建并组装本地仓库
-    └── publish.py                # 上传到 GitHub Release（可选清理旧附件）
+    ├── publish.py                # 上传到 GitHub Release（含 packages.json、可选清理旧附件）
+    └── status.py                 # 记录本次运行结果到 status.json（主页用）
 ```
 
 ---
