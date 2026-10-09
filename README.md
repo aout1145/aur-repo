@@ -201,14 +201,16 @@ sudo pacman -S <包名>
 
 ### 主页
 
-访问 `https://aur.aout.top/` 会看到一个极简主页，显示：
+访问 `https://aur.aout.top/` 会看到一个极简主页。页面大标题取自 `wrangler.toml` 的 `TITLE`
+配置项（不再是固定格式拼接），显示：
 
 - 如何添加仓库到 `pacman.conf`（仓库段名由 `DB_NAME` 推导，`Server` 用当前访问的域名）；
 - 是否启用签名：已签名时显示 `SigLevel = Required DatabaseOptional` 和导入 `repo.gpg` 的步骤
   （含 `pacman-key --lsign-key <key_id>`），未签名则显示 `SigLevel = Optional TrustAll`；
 - 软件包列表：每个包显示**完整包文件名**，并作为超链接直接指向下载地址
   （`https://<域名>/<filename>`），同时显示包数量；
-- 最近一次更新的时间与结果（成功/失败，附 CI 日志链接）和最近一次成功发布时间。
+- 最近一次更新的时间与结果（成功/失败，附 CI 日志链接）和最近一次成功发布时间，时间以
+  `YYYY-MM-DD HH:MM UTC` 显示。
 
 数据来自同一 Release 下的两个小文件：
 

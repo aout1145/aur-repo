@@ -23,6 +23,8 @@ RELEASE_TAG = "repo"
 # Must match `[repo].name` + ".db" in packages.toml.  Only this database (and
 # its .sig) is served; any other .db file is rejected.
 DB_NAME = "aout.db"
+# Title shown as the homepage heading (and in the browser tab).
+TITLE = "aout's AUR Repository"
 
 # Optional: serve from a custom domain on a zone in your Cloudflare account
 # instead of the workers.dev URL.

@@ -111,7 +111,12 @@ async function releaseAssetText(env, name) {
   }
 }
 
-function homePage({ origin, section, packages, signed, keyId, generatedAt, status }) {
+function humanTime(iso) {
+  const m = String(iso || "").match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  return m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]} UTC` : (iso || "?");
+}
+
+function homePage({ origin, title, section, packages, signed, keyId, generatedAt, status }) {
   const conf =
     `[${section}]\n` +
     `SigLevel = ${signed ? "Required DatabaseOptional" : "Optional TrustAll"}\n` +
@@ -138,9 +143,11 @@ sudo pacman-key --lsign-key ${esc(keyId || "<KEYID>")}</pre>`
     const changed = status.changed === false ? "（无变更）" : "";
     const link = status.run_url ? ` · <a href="${esc(status.run_url)}">日志</a>` : "";
     statusLine =
-      `最近一次更新：${esc(status.last_run_at || "?")} — ${esc(label)}${changed}${link}`;
+      `最近一次更新：${esc(humanTime(status.last_run_at))} — ${esc(label)}${changed}${link}`;
   }
-  const lastSuccess = generatedAt ? `<br>最近一次成功发布：${esc(generatedAt)}` : "";
+  const lastSuccess = generatedAt
+    ? `<br>最近一次成功发布：${esc(humanTime(generatedAt))}`
+    : "";
 
   return `<!doctype html>
 <html lang="zh">
@@ -148,7 +155,7 @@ sudo pacman-key --lsign-key ${esc(keyId || "<KEYID>")}</pre>`
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>${esc(section)} — AUR 包仓库</title>
+<title>${esc(title)}</title>
 <style>
 body{font-family:system-ui,sans-serif;max-width:52rem;margin:2rem auto;padding:0 1rem;line-height:1.5}
 pre{background:#f4f4f4;padding:.6rem .8rem;overflow-x:auto}
@@ -157,8 +164,7 @@ small{color:#666}
 </style>
 </head>
 <body>
-<h1>${esc(section)} — AUR 包仓库</h1>
-<h2>添加到 pacman</h2>
+<h1>${esc(title)}</h1>
 <pre>${esc(conf)}</pre>
 ${keySteps}
 <h2>软件包 (${packages.length})</h2>
@@ -179,6 +185,7 @@ async function renderHome(request, env, ctx) {
 
   const origin = new URL(request.url).origin;
   const section = (env.DB_NAME || "repo.db").replace(/\.db$/, "");
+  const title = env.TITLE || section;
 
   const cache = caches.default;
   const cacheKey = new Request(origin + "/", { method: "GET" });
@@ -217,7 +224,7 @@ async function renderHome(request, env, ctx) {
     }
   }
 
-  const html = homePage({ origin, section, packages, signed, keyId, generatedAt, status });
+  const html = homePage({ origin, title, section, packages, signed, keyId, generatedAt, status });
   const response = new Response(html, {
     headers: {
       "content-type": "text/html; charset=utf-8",
