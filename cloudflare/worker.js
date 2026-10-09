@@ -143,7 +143,9 @@ sudo pacman-key --lsign-key ${esc(keyId || "<KEYID>")}</pre>`
         const cell = p.filename
           ? `<a href="${esc(origin)}/${esc(p.filename)}">${esc(p.filename)}</a>`
           : esc(p.name || "");
-        const when = p.updated_at ? esc(humanTime(p.updated_at)) + " · " : "";
+        const when = p.updated_at
+          ? `<time datetime="${esc(p.updated_at)}">${esc(humanTime(p.updated_at))}</time> · `
+          : "";
         return `<tr><td>${cell}</td><td>${when}${esc(label)}</td></tr>`;
       }).join("\n")
     : `<tr><td>暂无软件包</td><td></td></tr>`;
@@ -173,6 +175,17 @@ ${keySteps}
 ${rows}
 </tbody>
 </table>
+<script>
+for (const t of document.querySelectorAll("time[datetime]")) {
+  const d = new Date(t.getAttribute("datetime"));
+  if (!isNaN(d)) {
+    t.textContent = d.toLocaleString(undefined, {
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit",
+    });
+  }
+}
+</script>
 </body>
 </html>`;
 }

@@ -211,7 +211,8 @@ custom_domain = true
 - 是否启用签名：已签名时给出 `repo.gpg` 导入与 `pacman-key --lsign-key` 步骤，否则 `Optional TrustAll`；
 - **无表头的两列表格**：
   - 第一列：完整包文件名，超链接直达 `https://<域名>/<filename>`（未发布过的包显示包名，无链接）；
-  - 第二列：该包的**最后更新时间 + 状态**（`正常` / `失败` / `已锁定`），时间格式 `YYYY-MM-DD HH:MM UTC`。
+  - 第二列：该包的**最后更新时间 + 状态**（`正常` / `失败` / `已锁定`）。时间按**访问者本地时区**显示
+    （由页面内一小段脚本转换，禁用 JavaScript 时回退为 `YYYY-MM-DD HH:MM UTC`）。
 
 主页数据来自同一 Release 下的 `repo.json`（由 `publish.py` 生成）：
 包列表、每包 `updated_at`/`status`、`signed`、`key_id`、生成时间。
