@@ -10,6 +10,11 @@ For every pkgbase in the plan, in dependency order:
   * otherwise download the already published package from the GitHub release
     and install it, so dependents can be built against it.
 
+Only packages that something else in the graph depends on are installed into
+the build container.  This keeps mutually conflicting packages (for example
+``cpeditor`` and ``cpeditor-bin``) from clashing at build time, even though
+they are allowed to coexist in the published repository.
+
 Package files are renamed to a GitHub-release-safe name *before* they are added
 to the repository database, so the database's ``%FILENAME%`` matches the asset
 name (GitHub renames characters such as ``:`` and ``+`` otherwise).
@@ -153,6 +158,14 @@ def main() -> int:
     order = plan["order"]
     remove = list(plan.get("remove", []))
 
+    # Only packages that something else in this graph depends on need to be
+    # installed into the build container.  Installing every package would fail
+    # for mutually conflicting packages (e.g. cpeditor and cpeditor-bin) that
+    # are perfectly fine to coexist in the published repository.
+    needed: set[str] = set()
+    for node in nodes.values():
+        needed.update(node.get("providers", []))
+
     os.makedirs(args.repo_dir, exist_ok=True)
     os.makedirs(args.work_dir, exist_ok=True)
     os.makedirs(args.downloads_dir, exist_ok=True)
@@ -184,7 +197,7 @@ def main() -> int:
     # are needed as dependencies.
     if args.repo and gh_available():
         for pkgbase, node in nodes.items():
-            if pkgbase in build_set:
+            if pkgbase in build_set or pkgbase not in needed:
                 continue
             for filename in node.get("install_files", []):
                 if not os.path.exists(os.path.join(args.downloads_dir, filename)):
@@ -225,9 +238,15 @@ def main() -> int:
                     sign_file(destination, signing_key, passphrase, args.dry_run)
                 publish_files.append(destination)
 
-            # Install the freshly built package(s) so dependents can build.
-            run_pacman_u(built, args.dry_run)
+            # Install the freshly built package(s) only if something in this
+            # graph depends on them, so dependents can build.
+            if pkgbase in needed:
+                run_pacman_u(built, args.dry_run)
+            else:
+                log(f"not installing {pkgbase}: no package in this run depends on it")
         else:
+            if pkgbase not in needed:
+                continue
             files = [os.path.join(args.downloads_dir, f) for f in node.get("install_files", [])]
             missing = [f for f in files if not os.path.exists(f)]
             if missing and not args.dry_run:
