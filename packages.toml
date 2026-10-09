@@ -44,7 +44,7 @@ arch = "x86_64"
 
 # Remove stale package assets from the release: older versions of rebuilt
 # packages, and packages removed from this list.  Off by default.
-remove_old = false
+remove_old = true
 
 [build]
 # Run the PKGBUILD `check()` function.  Enabling this also pulls in AUR
@@ -60,7 +60,7 @@ rebuild_dependents = false
 # VCS versions cannot be compared against the published version, so they are
 # only rebuilt when this is enabled or when a run is forced.  Prefer enabling
 # this per package via `[overrides.<name>]` or the `update_vcs` workflow input.
-update_vcs = false
+update_vcs = true
 
 # ---------------------------------------------------------------------------
 # Optional per-package overrides.  The key is the package (base) name exactly
