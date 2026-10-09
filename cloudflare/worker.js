@@ -9,6 +9,11 @@
 // Everything else returns 404, so the domain cannot be used to proxy arbitrary
 // content (which could get it flagged for phishing).
 //
+// The Worker also *never* passes through a GitHub page.  If the asset does not
+// exist (GitHub returns its own HTML 404) or the upstream response is anything
+// other than a real file, a minimal plain-text error is returned instead, and
+// GitHub/Fastly identifying headers are stripped from successful responses.
+//
 // Package files are immutable and cached at the edge for a year; the database
 // and the public key are always fetched fresh so a database is never served
 // with a mismatched signature.
@@ -44,21 +49,53 @@ function isImmutable(path) {
   return PACKAGE_RE.test(path) || PACKAGE_SIG_RE.test(path);
 }
 
+function errorResponse(status, message) {
+  return new Response(message + "\n", {
+    status,
+    headers: {
+      "content-type": "text/plain; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+    },
+  });
+}
+
+// Remove anything that would reveal (or cache) the GitHub/Fastly origin.
+function sanitizeHeaders(headers) {
+  for (const key of [...headers.keys()]) {
+    const k = key.toLowerCase();
+    if (
+      k === "set-cookie" ||
+      k === "via" ||
+      k === "server" ||
+      k.startsWith("x-github-") ||
+      k.startsWith("x-fastly-") ||
+      k.startsWith("x-served-by") ||
+      k.startsWith("x-cache") ||
+      k.startsWith("x-timer") ||
+      k.startsWith("x-ratelimit-") ||
+      k.startsWith("content-security-policy")
+    ) {
+      headers.delete(key);
+    }
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     if (request.method !== "GET" && request.method !== "HEAD") {
-      return new Response("method not allowed\n", { status: 405 });
+      return errorResponse(405, "method not allowed");
     }
 
     let path;
     try {
       path = decodeURIComponent(new URL(request.url).pathname).replace(/^\/+/, "");
     } catch {
-      return new Response("bad request\n", { status: 400 });
+      return errorResponse(400, "bad request");
     }
 
     if (!isAllowed(path, env.DB_NAME)) {
-      return new Response("not found\n", { status: 404 });
+      return errorResponse(404, "not found");
     }
 
     const immutable = isImmutable(path);
@@ -81,18 +118,32 @@ export default {
     headers.delete("host");
     headers.delete("cookie");
 
-    const origin = await fetch(target, {
-      method: request.method,
-      headers,
-      redirect: "follow",
-    });
+    let origin;
+    try {
+      origin = await fetch(target, {
+        method: request.method,
+        headers,
+        redirect: "follow",
+      });
+    } catch {
+      return errorResponse(502, "bad gateway");
+    }
+
+    const contentType = origin.headers.get("content-type") || "";
+    const ok = origin.status === 200 || origin.status === 206;
+
+    // Never let a GitHub error page (or any HTML) reach the client.
+    if (!ok || contentType.includes("text/html")) {
+      return errorResponse(origin.status === 404 ? 404 : 502,
+        origin.status === 404 ? "not found" : "bad gateway");
+    }
 
     const outHeaders = new Headers(origin.headers);
+    sanitizeHeaders(outHeaders);
     outHeaders.set(
       "Cache-Control",
       immutable ? "public, max-age=31536000, immutable" : "no-store",
     );
-    outHeaders.delete("set-cookie");
 
     const response = new Response(origin.body, {
       status: origin.status,
