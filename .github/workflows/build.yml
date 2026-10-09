@@ -130,13 +130,13 @@ jobs:
           path: public
           if-no-files-found: error
 
-  # Publishing and recording the run status live in one job.  The job runs even
-  # when the build failed (`if: always()`), but the publish step only runs when
-  # the build succeeded, so a failed build never touches the packages or the
-  # database.  The status step always runs so the homepage can show failures.
+  # Publishing runs after the build job.  build.py never fails on a per-package
+  # build error (it records it and continues), so this job always runs once the
+  # build step finished.  It publishes what it can, writes repo.json, and then
+  # exits non-zero if any package failed, so the run is marked red while the
+  # successful packages are still published.
   publish:
     needs: [plan, build]
-    if: always()
     runs-on: ubuntu-latest
     container:
       image: archlinux:base-devel
@@ -145,19 +145,9 @@ jobs:
         run: pacman -Syu --noconfirm --needed git python github-cli libarchive
       - uses: actions/checkout@v4
       - name: Download build output
-        if: needs.build.result == 'success'
         uses: actions/download-artifact@v4
         with:
           name: repo
           path: public
       - name: Publish to GitHub release
-        id: publish
-        if: needs.build.result == 'success'
         run: python3 scripts/publish.py --config packages.toml --repo-dir public
-      - name: Record run status
-        if: always()
-        env:
-          PLAN_RESULT: ${{ needs.plan.result }}
-          BUILD_RESULT: ${{ needs.build.result }}
-          PUBLISH_RESULT: ${{ steps.publish.outcome }}
-        run: python3 scripts/status.py --config packages.toml

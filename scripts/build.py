@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 """Build the packages from a plan produced by ``plan.py``.
 
-For every pkgbase in the plan, in dependency order:
+Packages are built in dependency order.  A package that fails to build does not
+abort the whole run: the failed package and its whole dependency *component*
+are "locked" (their published files and database entries are left untouched)
+while everything else is still built and published.
 
-  * if it must be built, clone its AUR git repository, run ``makepkg`` (as a
-    non-root user), sign the result if configured, install it into the running
-    container so later builds can use it, and add it to the local repository
-    database;
-  * otherwise download the already published package from the GitHub release
-    and install it, so dependents can be built against it.
+Locking works on the undirected dependency graph: if any node fails, its entire
+connected component is locked.  This locks the failed package together with its
+dependencies, and also every package that shares a dependency with it.
 
-Only packages that something else in the graph depends on are installed into
-the build container.  This keeps mutually conflicting packages (for example
-``cpeditor`` and ``cpeditor-bin``) from clashing at build time, even though
-they are allowed to coexist in the published repository.
+A summary (``result.json``) is written into ``--repo-dir`` for ``publish.py``:
 
-Package files are renamed to a GitHub-release-safe name *before* they are added
-to the repository database, so the database's ``%FILENAME%`` matches the asset
-name (GitHub renames characters such as ``:`` and ``+`` otherwise).
+    failed / skipped / locked / published          (pkgbases)
+    failed_names / blocked_names / published_names (pkgnames)
+    new_entries                                    (failed or locked packages
+                                                    that were never published)
+    failed_any
 
 The assembled repository is left in ``--repo-dir`` for ``publish.py``.
 """
@@ -132,6 +131,28 @@ def import_key(data: str, dry_run: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Locking
+# ---------------------------------------------------------------------------
+def locked_components(nodes: dict, failed: set[str]) -> set[str]:
+    """Return every node connected (in either direction) to a failed node."""
+    adjacency: dict[str, set[str]] = {name: set() for name in nodes}
+    for pkgbase, node in nodes.items():
+        for provider in node.get("providers", []):
+            adjacency.setdefault(provider, set()).add(pkgbase)
+            adjacency.setdefault(pkgbase, set()).add(provider)
+
+    locked: set[str] = set()
+    stack = [name for name in failed if name in nodes]
+    while stack:
+        current = stack.pop()
+        if current in locked:
+            continue
+        locked.add(current)
+        stack.extend(adjacency.get(current, ()))
+    return locked
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main() -> int:
@@ -203,47 +224,48 @@ def main() -> int:
                 if not os.path.exists(os.path.join(args.downloads_dir, filename)):
                     gh_release_download(args.repo, tag, filename, args.downloads_dir, args.dry_run)
 
-    publish_files: list[str] = []
+    failed: set[str] = set()      # own build failed
+    skipped: set[str] = set()     # not attempted because a dependency failed
+    built_files: dict[str, list[str]] = {}
 
     for pkgbase in order:
         node = nodes[pkgbase]
         if pkgbase in build_set:
+            if any(p in failed or p in skipped for p in node.get("providers", [])):
+                log(f"=== skipping {pkgbase}: a dependency failed to build ===")
+                skipped.add(pkgbase)
+                continue
+
             workdir = os.path.join(args.work_dir, pkgbase)
             if os.path.exists(workdir):
                 shutil.rmtree(workdir)
             log(f"=== building {pkgbase} ({node['version']}) ===")
-            run(
-                ["git", "clone", "--depth", "1", f"{AUR_GIT}/{pkgbase}.git", workdir],
-                dry_run=args.dry_run,
-            )
-            if is_root() and args.builder_user and not args.dry_run:
-                run(["chown", "-R", f"{args.builder_user}:{args.builder_user}", workdir])
-            run_makepkg(workdir, makepkg_flags(node, build_cfg), args.builder_user, args.dry_run)
+            try:
+                run(
+                    ["git", "clone", "--depth", "1", f"{AUR_GIT}/{pkgbase}.git", workdir],
+                    dry_run=args.dry_run,
+                )
+                if is_root() and args.builder_user and not args.dry_run:
+                    run(["chown", "-R", f"{args.builder_user}:{args.builder_user}", workdir])
+                run_makepkg(workdir, makepkg_flags(node, build_cfg), args.builder_user, args.dry_run)
 
-            built = sorted(
-                p for p in glob.glob(os.path.join(workdir, "*.pkg.tar.*"))
-                if not p.endswith(".sig")
-            )
-            if not built and not args.dry_run:
-                raise SystemExit(f"build of {pkgbase} produced no packages")
+                built = sorted(
+                    p for p in glob.glob(os.path.join(workdir, "*.pkg.tar.*"))
+                    if not p.endswith(".sig")
+                )
+                if not built and not args.dry_run:
+                    raise RuntimeError("build produced no packages")
+                built_files[pkgbase] = built
 
-            for package in built:
-                # Rename to a GitHub-release-safe asset name.  repo-add records
-                # this name as %FILENAME%, so clients download the same file.
-                safe = sanitize_filename(os.path.basename(package))
-                destination = os.path.join(args.repo_dir, safe)
-                if not args.dry_run:
-                    shutil.copy2(package, destination)
-                if signing_key:
-                    sign_file(destination, signing_key, passphrase, args.dry_run)
-                publish_files.append(destination)
-
-            # Install the freshly built package(s) only if something in this
-            # graph depends on them, so dependents can build.
-            if pkgbase in needed:
-                run_pacman_u(built, args.dry_run)
-            else:
-                log(f"not installing {pkgbase}: no package in this run depends on it")
+                # Install the freshly built package(s) only if something in
+                # this graph depends on them, so dependents can build.
+                if pkgbase in needed:
+                    run_pacman_u(built, args.dry_run)
+                else:
+                    log(f"not installing {pkgbase}: no package in this run depends on it")
+            except (subprocess.CalledProcessError, RuntimeError) as exc:
+                log(f"!!! build failed: {pkgbase}: {exc}")
+                failed.add(pkgbase)
         else:
             if pkgbase not in needed:
                 continue
@@ -252,9 +274,31 @@ def main() -> int:
             if missing and not args.dry_run:
                 log(f"warning: missing published packages for dependency {pkgbase}: "
                     + ", ".join(os.path.basename(f) for f in missing))
-            run_pacman_u([f for f in files if os.path.exists(f)], args.dry_run)
+            try:
+                run_pacman_u([f for f in files if os.path.exists(f)], args.dry_run)
+            except subprocess.CalledProcessError as exc:
+                log(f"warning: could not install dependency {pkgbase}: {exc}")
 
-    # Update the repository database with the newly built packages.
+    # A failed package locks its whole dependency component: itself, its
+    # dependencies, and every package that shares a dependency with it.
+    locked = locked_components(nodes, failed)
+    blocked = (build_set & locked) - failed
+    published = [pb for pb in order if pb in build_set and pb not in locked and pb in built_files]
+
+    # Copy the packages that may be published (successful and not locked).
+    publish_files: list[str] = []
+    for pkgbase in published:
+        for package in built_files[pkgbase]:
+            safe = sanitize_filename(os.path.basename(package))
+            destination = os.path.join(args.repo_dir, safe)
+            if not args.dry_run:
+                shutil.copy2(package, destination)
+            if signing_key:
+                sign_file(destination, signing_key, passphrase, args.dry_run)
+            publish_files.append(destination)
+
+    # Update the repository database with the newly published packages.  Locked
+    # packages keep their previous entries.
     if publish_files:
         cmd = ["repo-add", "--nocolor", "-q"]
         if signing_key:
@@ -280,13 +324,56 @@ def main() -> int:
         with open(public_key, "wb") as fh:
             run(["gpg", "--export", "--armor", signing_key], stdout=fh)
 
-    if publish_files:
-        log(f"prepared {len(publish_files)} package(s) for publishing")
-    elif remove:
-        log("no packages built; updated the database for removals")
+    _write_result(args.repo_dir, nodes, failed, skipped, locked, blocked, published)
+
+    if failed or skipped:
+        log(f"build finished with failures: {len(failed)} failed, {len(skipped)} skipped, "
+            f"{len(published)} published")
     else:
-        log("no packages were built; nothing to publish")
+        log(f"build finished: {len(published)} package(s) published")
     return 0
+
+
+def _names(nodes: dict, bases: set[str]) -> list[str]:
+    names: set[str] = set()
+    for pkgbase in bases:
+        node = nodes.get(pkgbase)
+        if node:
+            names.update(node.get("pkgnames", [pkgbase]))
+        else:
+            names.add(pkgbase)
+    return sorted(names)
+
+
+def _write_result(repo_dir: str, nodes: dict, failed: set[str], skipped: set[str],
+                  locked: set[str], blocked: set[str], published: list[str]) -> None:
+    # Packages that were never published have no file/version to show, so they
+    # are listed separately for the homepage (the "new package failed" case).
+    new_entries = []
+    for pkgbase in sorted(set(failed) | set(blocked)):
+        node = nodes.get(pkgbase)
+        if node and not node.get("present", False):
+            new_entries.append({
+                "name": pkgbase,
+                "version": node.get("version", ""),
+                "status": "failed" if pkgbase in failed else "blocked",
+            })
+
+    result = {
+        "failed": sorted(failed),
+        "skipped": sorted(skipped),
+        "locked": sorted(locked),
+        "published": sorted(published),
+        "failed_names": _names(nodes, failed),
+        "blocked_names": _names(nodes, blocked),
+        "published_names": _names(nodes, set(published)),
+        "new_entries": new_entries,
+        "failed_any": bool(failed or skipped),
+    }
+    path = os.path.join(repo_dir, "result.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(result, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
 
 
 if __name__ == "__main__":

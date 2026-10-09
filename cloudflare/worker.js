@@ -116,7 +116,7 @@ function humanTime(iso) {
   return m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]} UTC` : (iso || "?");
 }
 
-function homePage({ origin, title, section, packages, signed, keyId, generatedAt, status }) {
+function homePage({ origin, title, section, packages, signed, keyId }) {
   const conf =
     `[${section}]\n` +
     `SigLevel = ${signed ? "Required DatabaseOptional" : "Optional TrustAll"}\n` +
@@ -128,26 +128,16 @@ sudo pacman-key --add /tmp/repo.gpg
 sudo pacman-key --lsign-key ${esc(keyId || "<KEYID>")}</pre>`
     : "";
 
-  const files = packages.length
+  const rows = packages.length
     ? packages.map((p) => {
-        const href = `${esc(origin)}/${esc(p.filename)}`;
-        return `<li><a href="${href}">${esc(p.filename)}</a></li>`;
+        const label = p.status === "failed" ? "失败" : p.status === "blocked" ? "已锁定" : "正常";
+        const cell = p.filename
+          ? `<a href="${esc(origin)}/${esc(p.filename)}">${esc(p.filename)}</a>`
+          : esc(p.name || "");
+        const when = p.updated_at ? esc(humanTime(p.updated_at)) + " · " : "";
+        return `<tr><td>${cell}</td><td>${when}${esc(label)}</td></tr>`;
       }).join("\n")
-    : "<li>暂无软件包</li>";
-
-  let statusLine = "状态未知";
-  if (status) {
-    const label = status.conclusion === "success"
-      ? "成功"
-      : status.conclusion === "failure" ? "失败" : esc(status.conclusion || "未知");
-    const changed = status.changed === false ? "（无变更）" : "";
-    const link = status.run_url ? ` · <a href="${esc(status.run_url)}">日志</a>` : "";
-    statusLine =
-      `最近一次更新：${esc(humanTime(status.last_run_at))} — ${esc(label)}${changed}${link}`;
-  }
-  const lastSuccess = generatedAt
-    ? `<br>最近一次成功发布：${esc(humanTime(generatedAt))}`
-    : "";
+    : `<tr><td>暂无软件包</td><td></td></tr>`;
 
   return `<!doctype html>
 <html lang="zh">
@@ -159,8 +149,9 @@ sudo pacman-key --lsign-key ${esc(keyId || "<KEYID>")}</pre>`
 <style>
 body{font-family:system-ui,sans-serif;max-width:52rem;margin:2rem auto;padding:0 1rem;line-height:1.5}
 pre{background:#f4f4f4;padding:.6rem .8rem;overflow-x:auto}
-ul{padding-left:1.2rem}
-small{color:#666}
+table{border-collapse:collapse}
+td{padding:.25rem 0;vertical-align:top}
+td+td{padding-left:1.5rem;color:#666;white-space:nowrap}
 </style>
 </head>
 <body>
@@ -168,10 +159,11 @@ small{color:#666}
 <pre>${esc(conf)}</pre>
 ${keySteps}
 <h2>软件包 (${packages.length})</h2>
-<ul>
-${files}
-</ul>
-<p><small>${statusLine}${lastSuccess}</small></p>
+<table>
+<tbody>
+${rows}
+</tbody>
+</table>
 </body>
 </html>`;
 }
@@ -194,37 +186,22 @@ async function renderHome(request, env, ctx) {
     return cached;
   }
 
-  const [pkgText, statusText] = await Promise.all([
-    releaseAssetText(env, "packages.json"),
-    releaseAssetText(env, "status.json"),
-  ]);
-
+  const text = await releaseAssetText(env, "repo.json");
   let packages = [];
   let signed = false;
   let keyId = "";
-  let generatedAt = "";
-  if (pkgText) {
+  if (text) {
     try {
-      const data = JSON.parse(pkgText);
+      const data = JSON.parse(text);
       packages = Array.isArray(data.packages) ? data.packages : [];
       signed = !!data.signed;
       keyId = data.key_id || "";
-      generatedAt = data.generated_at || "";
     } catch {
       // ignore malformed manifest
     }
   }
 
-  let status = null;
-  if (statusText) {
-    try {
-      status = JSON.parse(statusText);
-    } catch {
-      // ignore malformed status
-    }
-  }
-
-  const html = homePage({ origin, title, section, packages, signed, keyId, generatedAt, status });
+  const html = homePage({ origin, title, section, packages, signed, keyId });
   const response = new Response(html, {
     headers: {
       "content-type": "text/html; charset=utf-8",

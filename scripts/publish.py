@@ -1,23 +1,17 @@
 #!/usr/bin/env python3
-"""Publish the assembled repository to a GitHub release.
+"""Publish the successfully built packages to a GitHub release.
 
-All files are uploaded as release assets of a single, fixed release (the tag
-comes from ``[repo].tag`` in ``packages.toml``).  This means pacman can use the
-release download directory directly as its ``Server``:
+``build.py`` writes ``result.json`` describing which packages failed, which
+were locked (see build.py) and which may be published.  This script:
 
-    https://github.com/<owner>/<repo>/releases/download/<tag>
+  1. uploads the package files (and ``repo.gpg``) first;
+  2. replaces the database last, restoring the previous one on failure;
+  3. writes ``repo.json`` (package list + per-package status) for the homepage;
+  4. removes the obsolete ``packages.json`` / ``status.json`` assets;
+  5. exits non-zero if any package failed, so the run is marked red even
+     though everything that could be published was published.
 
-or, when fronted by the bundled Cloudflare Worker, a single custom domain.
-
-The update is done in a safe order:
-
-  1. every package file (and ``repo.gpg``) is uploaded first;
-  2. the database (``<name>.db`` and its signature) is replaced last, and the
-     previous database is restored if that replacement fails.
-
-A build failure never reaches this script, so a failed build leaves the release
-untouched.  Even if this script fails part-way, the database still points at
-packages that are actually present, so clients stay consistent.
+Locked packages keep their previous files and database entries untouched.
 """
 
 from __future__ import annotations
@@ -44,41 +38,18 @@ from aur_lib import (  # noqa: E402
 )
 
 BATCH_SIZE = 40
+LEGACY_ASSETS = ("packages.json", "status.json")
+RESULT_FILE = "result.json"
+MANIFEST_FILE = "repo.json"
 
 
-def write_manifest(repo_dir: str, repo_name: str) -> str:
-    """Write ``packages.json`` (used by the Worker homepage) from the database."""
-    db_path = os.path.join(repo_dir, f"{repo_name}.db.tar.gz")
-    if not os.path.exists(db_path):
-        db_path = os.path.join(repo_dir, f"{repo_name}.db")
-    db = load_db(db_path)
-    packages = sorted(
-        (
-            {
-                "name": name,
-                "version": entry.get("VERSION", ""),
-                "filename": entry.get("FILENAME", ""),
-                "desc": entry.get("DESC", ""),
-                "arch": entry.get("ARCH", ""),
-            }
-            for name, entry in db.items()
-            if entry.get("FILENAME")
-        ),
-        key=lambda p: p["name"],
-    )
-    manifest = {
-        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "signed": bool(os.environ.get("GPG_KEY")),
-        "key_id": os.environ.get("GPG_KEY", ""),
-        "packages": packages,
-    }
-    path = os.path.join(repo_dir, "packages.json")
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(manifest, fh, ensure_ascii=False, indent=2)
-        fh.write("\n")
-    return path
+def utcnow() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# ---------------------------------------------------------------------------
+# GitHub release helpers
+# ---------------------------------------------------------------------------
 def upload(repo: str, tag: str, files: list[str], dry_run: bool) -> None:
     files = [f for f in files if os.path.exists(f)]
     for i in range(0, len(files), BATCH_SIZE):
@@ -89,7 +60,7 @@ def upload(repo: str, tag: str, files: list[str], dry_run: bool) -> None:
         )
 
 
-def download_asset(repo: str, tag: str, name: str, directory: str) -> bool:
+def download_asset(repo: str, tag: str, name: str, directory: str) -> str | None:
     proc = run(
         ["gh", "release", "download", tag, "--repo", repo, "--pattern", name,
          "--dir", directory, "--clobber"],
@@ -97,7 +68,8 @@ def download_asset(repo: str, tag: str, name: str, directory: str) -> bool:
         capture_output=True,
         text=True,
     )
-    return proc.returncode == 0 and os.path.exists(os.path.join(directory, name))
+    path = os.path.join(directory, name)
+    return path if proc.returncode == 0 and os.path.exists(path) else None
 
 
 def replace_database(repo: str, tag: str, db_files: list[str], dry_run: bool) -> None:
@@ -133,11 +105,7 @@ def release_id(repo: str, tag: str) -> str:
 
 
 def release_assets(repo: str, tag: str) -> list[tuple[str, str]]:
-    """Return ``(asset_id, name)`` pairs for the release.
-
-    Uses the paginated assets endpoint so it also works for releases with many
-    assets.
-    """
+    """Return ``(asset_id, name)`` pairs, via the paginated assets endpoint."""
     rid = release_id(repo, tag)
     if not rid:
         return []
@@ -158,6 +126,16 @@ def release_assets(repo: str, tag: str) -> list[tuple[str, str]]:
     return assets
 
 
+def delete_assets(repo: str, tag: str, names: set[str], dry_run: bool) -> None:
+    for asset_id, name in release_assets(repo, tag):
+        if name in names:
+            log(f"removing obsolete asset {name}")
+            run(
+                ["gh", "api", "-X", "DELETE", f"repos/{repo}/releases/assets/{asset_id}"],
+                dry_run=dry_run,
+            )
+
+
 def verify_uploaded(repo: str, tag: str, names: list[str]) -> None:
     """Fail if any expected asset is not actually present in the release."""
     present = {name for _, name in release_assets(repo, tag)}
@@ -169,12 +147,84 @@ def verify_uploaded(repo: str, tag: str, names: list[str]) -> None:
     log(f"upload verified ({len(names)} asset(s))")
 
 
+# ---------------------------------------------------------------------------
+# Manifest (homepage data)
+# ---------------------------------------------------------------------------
+def build_manifest(repo_dir: str, repo_name: str, result: dict, previous: dict) -> dict:
+    db_path = os.path.join(repo_dir, f"{repo_name}.db.tar.gz")
+    if not os.path.exists(db_path):
+        db_path = os.path.join(repo_dir, f"{repo_name}.db")
+    db = load_db(db_path)
+
+    failed = set(result.get("failed_names", []))
+    blocked = set(result.get("blocked_names", []))
+    published = set(result.get("published_names", []))
+    previous_by_name = {
+        entry.get("name"): entry
+        for entry in (previous or {}).get("packages", [])
+        if entry.get("name")
+    }
+
+    now = utcnow()
+    packages: list[dict] = []
+    for name, entry in db.items():
+        filename = entry.get("FILENAME")
+        if not filename:
+            continue
+        if name in failed:
+            status = "failed"
+        elif name in blocked:
+            status = "blocked"
+        else:
+            status = "ok"
+        prev = previous_by_name.get(name)
+        if name in published:
+            updated_at = now
+        elif prev and prev.get("updated_at"):
+            updated_at = prev["updated_at"]
+        else:
+            updated_at = now
+        packages.append({
+            "name": name,
+            "version": entry.get("VERSION", ""),
+            "filename": filename,
+            "updated_at": updated_at,
+            "status": status,
+        })
+
+    # Packages that failed/were locked before ever being published have no file
+    # in the database, so add them from the build result.
+    known = {p["name"] for p in packages}
+    for entry in result.get("new_entries", []):
+        if entry.get("name") in known:
+            continue
+        packages.append({
+            "name": entry.get("name", ""),
+            "version": entry.get("version", ""),
+            "filename": None,
+            "updated_at": None,
+            "status": entry.get("status", "failed"),
+        })
+
+    packages.sort(key=lambda p: (p.get("filename") or p.get("name") or ""))
+    return {
+        "repo": repo_name,
+        "signed": bool(os.environ.get("GPG_KEY")),
+        "key_id": os.environ.get("GPG_KEY", ""),
+        "generated_at": now,
+        "packages": packages,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Pruning
+# ---------------------------------------------------------------------------
 def prune(repo: str, tag: str, repo_dir: str, repo_name: str, dry_run: bool) -> None:
     db_path = os.path.join(repo_dir, f"{repo_name}.db.tar.gz")
     if not os.path.exists(db_path):
         db_path = os.path.join(repo_dir, f"{repo_name}.db")
     db = load_db(db_path)
-    keep = {f"{repo_name}.db", f"{repo_name}.db.sig", "repo.gpg"}
+    keep = {f"{repo_name}.db", f"{repo_name}.db.sig", "repo.gpg", MANIFEST_FILE}
     for entry in db.values():
         filename = entry.get("FILENAME")
         if filename:
@@ -194,6 +244,9 @@ def prune(repo: str, tag: str, repo_dir: str, repo_name: str, dry_run: bool) -> 
         log(f"removed {removed} obsolete asset(s)")
 
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="packages.toml")
@@ -206,6 +259,13 @@ def main() -> int:
     repo_name = cfg["repo"]["name"]
     tag = cfg["repo"].get("tag", "repo")
 
+    result_path = os.path.join(args.repo_dir, RESULT_FILE)
+    result = {}
+    if os.path.exists(result_path):
+        with open(result_path, encoding="utf-8") as fh:
+            result = json.load(fh)
+    failed_any = bool(result.get("failed_any"))
+
     if not args.repo or not gh_available() or not os.path.isdir(args.repo_dir):
         if not args.repo:
             problem = "no repository configured (set GITHUB_REPOSITORY or pass --repo)"
@@ -215,17 +275,30 @@ def main() -> int:
             problem = f"{args.repo_dir} does not exist; did the build step produce artifacts?"
         if args.dry_run:
             log(f"dry run: {problem}; skipping")
-            return 0
+            return 5 if failed_any else 0
         raise SystemExit(problem)
 
     gh_ensure_release(args.repo, tag, args.dry_run)
 
-    # Regenerate the manifest used by the Worker homepage from the database we
-    # are about to publish, so it is uploaded together with the packages.
-    write_manifest(args.repo_dir, repo_name)
+    # Merge the previous manifest so unchanged packages keep their timestamps.
+    with tempfile.TemporaryDirectory() as tmp:
+        previous_path = download_asset(args.repo, tag, MANIFEST_FILE, tmp)
+        previous = {}
+        if previous_path:
+            try:
+                with open(previous_path, encoding="utf-8") as fh:
+                    previous = json.load(fh)
+            except (OSError, json.JSONDecodeError):
+                previous = {}
 
-    # Everything except repo-add's working files (.db.tar.gz / .files*);
-    # only the `<name>.db` and its signature are served.
+    manifest = build_manifest(args.repo_dir, repo_name, result, previous)
+    manifest_path = os.path.join(args.repo_dir, MANIFEST_FILE)
+    with open(manifest_path, "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+
+    # Only the database, its signature and the manifest are served; everything
+    # else (repo-add's working files, result.json) is internal.
     working = {
         f"{repo_name}.db.tar.gz",
         f"{repo_name}.db.tar.gz.sig",
@@ -233,6 +306,7 @@ def main() -> int:
         f"{repo_name}.files",
         f"{repo_name}.files.sig",
         f"{repo_name}.files.tar.gz.sig",
+        RESULT_FILE,
     }
     all_files = sorted(
         os.path.join(args.repo_dir, f)
@@ -240,27 +314,32 @@ def main() -> int:
         if f not in working
     )
     db_files = [f for f in all_files if os.path.basename(f) in (f"{repo_name}.db", f"{repo_name}.db.sig")]
-    payload = [f for f in all_files if f not in db_files]
+    payload = [
+        f for f in all_files
+        if f not in db_files and os.path.basename(f) != MANIFEST_FILE
+    ]
 
-    if not db_files:
-        if args.dry_run:
-            log("dry run: no database to publish")
-            return 0
-        raise SystemExit(
-            f"refusing to publish: {repo_name}.db was not found in {args.repo_dir}"
-        )
+    expected = [os.path.basename(f) for f in payload]
+    if db_files:
+        expected += [os.path.basename(f) for f in db_files]
+    expected.append(MANIFEST_FILE)
 
-    # 1) Packages and the public key first, 2) the database last (atomically).
+    # 1) packages and public key, 2) database, 3) the manifest.
     upload(args.repo, tag, payload, args.dry_run)
     replace_database(args.repo, tag, db_files, args.dry_run)
+    upload(args.repo, tag, [manifest_path], args.dry_run)
 
-    # Never report success unless the assets really are present in the release.
+    delete_assets(args.repo, tag, set(LEGACY_ASSETS), args.dry_run)
+
     if not args.dry_run:
-        verify_uploaded(args.repo, tag, [os.path.basename(f) for f in [*payload, *db_files]])
+        verify_uploaded(args.repo, tag, expected)
 
     if cfg["repo"].get("remove_old"):
         prune(args.repo, tag, args.repo_dir, repo_name, args.dry_run)
 
+    if failed_any:
+        log("publishing finished, but some packages failed to build (see the homepage)")
+        return 1
     return 0
 
 
