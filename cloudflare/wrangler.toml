@@ -32,6 +32,11 @@ TITLE = "aout's AUR Repository"
 [deploy]
 auto = true
 
+# Read by publish.py: whether to purge replaced/removed package files from the
+# Cloudflare cache (by Cache-Tag).  Requires the CLOUDFLARE_ZONE_ID secret and
+# a token with "Zone -> Cache Purge -> Purge".
+purge = true
+
 # Optional: serve from a custom domain on a zone in your Cloudflare account
 # instead of the workers.dev URL.
 

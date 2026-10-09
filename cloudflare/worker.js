@@ -53,6 +53,15 @@ function isImmutable(path) {
   return PACKAGE_RE.test(path) || PACKAGE_SIG_RE.test(path);
 }
 
+// Cache package files for a finite time so that any entry we fail to purge
+// expires on its own; publish.py additionally purges by Cache-Tag.
+const PACKAGE_TTL_SECONDS = 2592000; // 30 days
+
+function packageTag(path) {
+  const base = path.endsWith(".sig") ? path.slice(0, -4) : path;
+  return `pkg:${base}`;
+}
+
 function errorResponse(status, message) {
   return new Response(message + "\n", {
     status,
@@ -279,8 +288,16 @@ export default {
     sanitizeHeaders(outHeaders);
     outHeaders.set(
       "Cache-Control",
-      immutable ? "public, max-age=31536000, immutable" : "no-store",
+      immutable
+        ? `public, max-age=${PACKAGE_TTL_SECONDS}, immutable`
+        : "no-store",
     );
+    if (immutable) {
+      // Tag cached package files so publish.py can purge them from Cloudflare
+      // when the version is replaced or the package is removed.  Cloudflare
+      // strips this header before returning the response to clients.
+      outHeaders.set("Cache-Tag", `pkg,${packageTag(path)}`);
+    }
 
     const response = new Response(origin.body, {
       status: origin.status,

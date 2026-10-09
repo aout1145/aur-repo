@@ -23,6 +23,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import urllib.request
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -245,6 +246,71 @@ def prune(repo: str, tag: str, repo_dir: str, repo_name: str, dry_run: bool) -> 
 
 
 # ---------------------------------------------------------------------------
+# Cloudflare cache purge
+# ---------------------------------------------------------------------------
+def obsolete_filenames(previous: dict, repo_dir: str, repo_name: str) -> list[str]:
+    """Files present in the previous manifest but no longer in the database."""
+    db_path = os.path.join(repo_dir, f"{repo_name}.db.tar.gz")
+    if not os.path.exists(db_path):
+        db_path = os.path.join(repo_dir, f"{repo_name}.db")
+    current = {
+        entry.get("FILENAME")
+        for entry in load_db(db_path).values()
+        if entry.get("FILENAME")
+    }
+    previous_files = {
+        p.get("filename") for p in previous.get("packages", []) if p.get("filename")
+    }
+    return sorted(previous_files - current)
+
+
+def cloudflare_purge_enabled() -> bool:
+    """Whether `[deploy] purge` is enabled in cloudflare/wrangler.toml."""
+    try:
+        import tomllib
+
+        with open("cloudflare/wrangler.toml", "rb") as fh:
+            return bool(tomllib.load(fh).get("deploy", {}).get("purge", False))
+    except (OSError, ValueError):
+        return False
+
+
+def purge_cloudflare_tags(tags: list[str], dry_run: bool) -> None:
+    """Purge the given Cache-Tags from the Cloudflare cache (max 30 per call)."""
+    if not tags:
+        return
+    zone = os.environ.get("CLOUDFLARE_ZONE_ID", "")
+    token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
+    if not zone or not token:
+        log("warning: cache purge enabled but CLOUDFLARE_ZONE_ID/CLOUDFLARE_API_TOKEN are not set")
+        return
+
+    url = f"https://api.cloudflare.com/client/v4/zones/{zone}/purge_cache"
+    for i in range(0, len(tags), 30):
+        batch = tags[i : i + 30]
+        log(f"purging {len(batch)} cache tag(s)")
+        if dry_run:
+            continue
+        body = json.dumps({"tags": batch}).encode()
+        request = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={
+                "authorization": f"Bearer {token}",
+                "content-type": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                result = json.loads(response.read())
+            if not result.get("success"):
+                log(f"warning: cache purge failed: {result.get('errors')}")
+        except Exception as exc:  # noqa: BLE001 - purge is best effort
+            log(f"warning: cache purge request failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main() -> int:
@@ -336,6 +402,14 @@ def main() -> int:
 
     if cfg["repo"].get("remove_old"):
         prune(args.repo, tag, args.repo_dir, repo_name, args.dry_run)
+
+    # Purge replaced/removed package files from the Cloudflare edge cache.
+    if cloudflare_purge_enabled():
+        obsolete = obsolete_filenames(previous, args.repo_dir, repo_name)
+        if obsolete:
+            purge_cloudflare_tags([f"pkg:{name}" for name in obsolete], args.dry_run)
+        else:
+            log("no obsolete package files to purge from the cache")
 
     if failed_any:
         log("publishing finished, but some packages failed to build (see the homepage)")
