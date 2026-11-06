@@ -14,6 +14,10 @@
 # ---------------------------------------------------------------------------
 
 # AUR package names (or pkgbase names) to build and keep up to date.
+#
+# A package from another Git repository can be added as an inline table.  The
+# directory must contain PKGBUILD and .SRCINFO; `ref` is optional (branch or
+# tag) and `path` is relative to the repository root.
 packages = [
   "cpeditor",
   "cpeditor-bin",
@@ -25,6 +29,7 @@ packages = [
   "moekoemusic-bin",
   "motrix-next-bin",
   "browser-use-cli",
+  { name = "dmcl-gtk4-git", git = "https://github.com/aout1145/dmcl.git", path = "packaging/aur/dmcl-gtk4-git" },
 ]
 
 # ---------------------------------------------------------------------------

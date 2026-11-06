@@ -32,6 +32,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from pathlib import PurePosixPath
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -98,6 +99,39 @@ def run_pacman_u(files: list[str], dry_run: bool) -> None:
         return
     pacman = ["pacman"] if is_root() else ["sudo", "pacman"]
     run([*pacman, "-U", "--noconfirm", "--needed", *files], dry_run=dry_run)
+
+
+def clone_package(node: dict, pkgbase: str, workdir: str, dry_run: bool) -> str:
+    """Clone the package sources and return the directory containing PKGBUILD.
+
+    AUR packages are cloned from aur.archlinux.org.  Packages with a ``custom``
+    source are cloned from the configured Git repository; ``path`` selects the
+    subdirectory that holds PKGBUILD and .SRCINFO.
+    """
+    custom = node.get("custom")
+    if not custom:
+        run(
+            ["git", "clone", "--depth", "1", f"{AUR_GIT}/{pkgbase}.git", workdir],
+            dry_run=dry_run,
+        )
+        return workdir
+
+    command = ["git", "clone", "--depth", "1", "--single-branch"]
+    if custom.get("ref"):
+        command.extend(["--branch", custom["ref"]])
+    command.extend(["--", custom["git"], workdir])
+    run(command, dry_run=dry_run)
+
+    relative = PurePosixPath(custom.get("path") or ".")
+    if relative.is_absolute() or ".." in relative.parts:
+        raise RuntimeError(f"unsafe custom source path: {relative}")
+    build_dir = os.path.realpath(os.path.join(workdir, *relative.parts))
+    root = os.path.realpath(workdir)
+    if os.path.commonpath([root, build_dir]) != root:
+        raise RuntimeError(f"custom source path escapes the repository: {relative}")
+    if not dry_run and not os.path.isdir(build_dir):
+        raise RuntimeError(f"custom source path does not exist: {relative}")
+    return build_dir
 
 
 def _which(name: str) -> str:
@@ -265,19 +299,16 @@ def main() -> int:
                 shutil.rmtree(workdir)
             log(f"=== building {pkgbase} ({node['version']}) ===")
             try:
-                run(
-                    ["git", "clone", "--depth", "1", f"{AUR_GIT}/{pkgbase}.git", workdir],
-                    dry_run=args.dry_run,
-                )
+                build_dir = clone_package(node, pkgbase, workdir, args.dry_run)
                 if is_root() and args.builder_user and not args.dry_run:
                     run(["chown", "-R", f"{args.builder_user}:{args.builder_user}", workdir])
-                run_makepkg(workdir, makepkg_flags(node, build_cfg), args.builder_user, args.dry_run)
+                run_makepkg(build_dir, makepkg_flags(node, build_cfg), args.builder_user, args.dry_run)
 
                 built = [
-                    p for p in glob.glob(os.path.join(workdir, "*.pkg.tar.*"))
+                    p for p in glob.glob(os.path.join(build_dir, "*.pkg.tar.*"))
                     if not p.endswith(".sig") and not _DEBUG_FILE_RE.search(os.path.basename(p))
                 ]
-                for other in glob.glob(os.path.join(workdir, "*.pkg.tar.*")):
+                for other in glob.glob(os.path.join(build_dir, "*.pkg.tar.*")):
                     if _DEBUG_FILE_RE.search(os.path.basename(other)):
                         log(f"skipping debug package {os.path.basename(other)}")
                 if not built and not args.dry_run:

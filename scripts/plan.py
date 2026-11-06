@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from aur_lib import (  # noqa: E402
     AurClient,
+    CustomSourceError,
     Pacman,
     db_filenames_for,
     db_version_for,
@@ -73,7 +74,10 @@ def main() -> int:
     parser.add_argument("--repo", default=github_repo(), help="owner/repo (defaults to $GITHUB_REPOSITORY)")
     args = parser.parse_args()
 
-    cfg = load_config(args.config)
+    try:
+        cfg = load_config(args.config)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"error: could not read {args.config}: {exc}") from exc
     repo_name = cfg["repo"]["name"]
     tag = cfg["repo"].get("tag", "repo")
     build_opts = cfg["build"]
@@ -87,6 +91,15 @@ def main() -> int:
     client = AurClient()
     pacman = Pacman()
 
+    # Register custom Git sources before resolving, so their own .SRCINFO and
+    # PKGBUILD are read from the configured repository/path instead of the AUR.
+    for entry in cfg["packages"]:
+        if entry.get("custom"):
+            try:
+                client.add_custom_source(entry["name"], entry["custom"])
+            except ValueError as exc:
+                raise SystemExit(f"error: {exc}") from exc
+
     # Map every configured package to its pkgbase and collect per-package
     # overrides keyed by pkgbase.
     options: dict[str, dict] = {}
@@ -94,7 +107,10 @@ def main() -> int:
     wanted = parse_filter(args.packages)
     unmatched = set(wanted)
     for entry in cfg["packages"]:
-        pkgbase = client.canonical_pkgbase(entry["name"])
+        try:
+            pkgbase = client.canonical_pkgbase(entry["name"])
+        except CustomSourceError as exc:
+            raise SystemExit(f"error: {exc}") from exc
         if not pkgbase:
             log(f"warning: skipping unknown AUR package '{entry['name']}'")
             continue
@@ -114,7 +130,10 @@ def main() -> int:
 
     if targets:
         log(f"resolving AUR dependencies for: {', '.join(targets)}")
-        graph = resolve(client, pacman, targets, run_checks=build_opts["run_checks"])
+        try:
+            graph = resolve(client, pacman, targets, run_checks=build_opts["run_checks"])
+        except CustomSourceError as exc:
+            raise SystemExit(f"error: {exc}") from exc
         nodes = graph["nodes"]
         order = graph["order"]
         unresolved = graph.get("unresolved", [])
@@ -172,6 +191,7 @@ def main() -> int:
             "version": node["version"],
             "pkgnames": node["pkgnames"],
             "vcs": bool(vcs),
+            "custom": node.get("custom"),
             "publish": bool(node["publish"]),
             "target": is_target,
             "providers": node["providers"],
@@ -187,7 +207,11 @@ def main() -> int:
     # AUR/network failure could wipe out packages that are still wanted.
     managed = {name for node in nodes.values() for name in node["pkgnames"]}
     remove: list[str] = []
-    if db:
+    if db and wanted:
+        # A subset filter only updates the selected packages.  Removing every
+        # unselected entry would wipe the rest of the repository.
+        log("note: skipping package removal because a subset filter is active")
+    elif db:
         if unresolved:
             log("warning: skipping package removal because some dependencies could not "
                 f"be resolved: {', '.join(unresolved)}")

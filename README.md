@@ -26,7 +26,8 @@
 ## 特性
 
 - **配置简单**：根目录一个 [`packages.toml`](packages.toml) 决定要构建哪些包。
-- **正确处理 AUR 依赖**：自动解析依赖图（含只存在于 AUR 的依赖），按拓扑顺序先构建依赖再构建目标包。
+- **支持自定义来源**：除 AUR 包名外，还可以直接指定 Git 仓库、ref 和子目录来构建自己的包。
+- **正确处理依赖**：自动解析依赖图（含只存在于 AUR 的依赖），按拓扑顺序先构建依赖再构建目标包。
 - **按需更新**：只有「仓库里没有」或「AUR 版本比已发布的更新」时才重建；定时任务也只检查版本，
   **不会无条件重新构建**。
 - **按包原子更新**：单个包构建失败不会中止整体，失败包及其依赖分量会被「锁定」，其余正常更新。
@@ -43,7 +44,8 @@
 
 > 下例中的 `OWNER/REPO`、`repo.example.com`、`custom` 等是占位符，换成你自己的即可。
 
-1. **加包**：编辑 [`packages.toml`](packages.toml)，把要构建的 AUR 包名填进 `packages`。
+1. **加包**：编辑 [`packages.toml`](packages.toml)，把要构建的 AUR 包名填进 `packages`；
+   自己的包可以用 Git 仓库 + 子目录的形式加入（见[自定义来源的包](#自定义来源的包)）。
 2. **构建**：进入 **Actions → Build AUR repository → Run workflow**（或直接 push 改动）；
    产物自动发布到 Release。
 3. **接入**：在客户端 `pacman.conf` 里加一段（见 [部署步骤](#部署步骤)）。
@@ -68,6 +70,8 @@
 packages = [
   "paru",
   "aurutils",
+  # 自定义来源：Git 仓库 + 可选 ref/path 子目录
+  { name = "dmcl-gtk4-git", git = "https://github.com/aout1145/dmcl.git", ref = "main", path = "packaging/aur/dmcl-gtk4-git" },
   # "mpv-full-git",      # 示例：会自动带上 AUR 依赖 ffmpeg-git
 ]
 
@@ -84,6 +88,8 @@ update_vcs = false          # 是否每次重建 VCS 包（-git 等）
 skip_pgp_check = false      # 构建时跳过源码 PGP 校验
 ```
 
+> TOML 的内联表（`{ ... }`）必须写在同一行内。
+
 单包覆盖（键名必须与 `packages` 里完全一致）：
 
 ```toml
@@ -92,6 +98,35 @@ vcs = true          # 强制按 VCS 包处理
 update_vcs = true   # 每次运行都重建
 skip_check = true   # 不跑 check()
 ```
+
+#### 自定义来源的包
+
+`packages` 中的条目可以是 AUR 包名字符串，也可以是一个内联表：
+
+```toml
+packages = [
+  "paru",
+  { name = "dmcl-gtk4-git", git = "https://github.com/aout1145/dmcl.git", ref = "main", path = "packaging/aur/dmcl-gtk4-git" },
+]
+```
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `name` | 是 | 包名，必须与源目录 `.SRCINFO` 里的 `pkgbase` 完全一致。 |
+| `git` | 是 | Git 克隆 URL（HTTPS/SSH 均可；CI 中必须是无需交互即可访问的地址）。 |
+| `ref` | 否 | 分支或 tag；省略时使用仓库的默认分支。 |
+| `path` | 否 | `.SRCINFO` 和 `PKGBUILD` 所在子目录，相对于仓库根；省略时为仓库根目录。 |
+
+要求：
+
+- 目标目录里必须有 `PKGBUILD` 和 `.SRCINFO`（与 AUR 包目录结构相同）；
+  不会自动生成 `.SRCINFO`。
+- `path` 必须是仓库内的相对路径，不能是绝对路径或包含 `..`。
+- `name` 是依赖解析和仓库数据库使用的 pkgbase。单包覆盖仍写在 `[overrides.<name>]`。
+- 版本判断与 AUR 包相同：比较 `.SRCINFO` 版本；如果 PKGBUILD 定义了 `pkgver()`，
+  则按 VCS 包处理，只有 `update_vcs = true` 或 `force` 时才重建。
+- 私有 Git 仓库需要在 runner 上配置可用的凭据（例如 SSH key / credential helper）；
+  不要把访问令牌直接写进 `packages.toml`。
 
 ### 3. 触发流水线
 
@@ -277,7 +312,8 @@ CI 会用该密钥对每个软件包和数据库做分离签名，并发布 `rep
 
 `scripts/aur_lib.py` 会：
 
-1. 从 AUR 拉取每个包（`pkgbase`）的 `.SRCINFO`；
+1. 对普通 AUR 条目从 AUR 拉取每个包（`pkgbase`）的 `.SRCINFO`；对自定义来源条目，
+   浅克隆配置的 Git 仓库并读取 `path` 下的 `.SRCINFO` / `PKGBUILD`；
 2. 收集 `depends` / `makedepends` /（可选）`checkdepends`；
 3. 判断依赖是否来自官方仓库（读取 `/var/lib/pacman/sync/*.db`，含 `provides`）；
 4. 官方仓库没有的依赖，通过 AUR RPC（按包名、再按 `provides`）找到对应 `pkgbase`，加入依赖图；
@@ -286,7 +322,8 @@ CI 会用该密钥对每个软件包和数据库做分离签名，并发布 `rep
 
 `build` job 在**临时 Arch 容器**里构建，用 `makepkg -s` 安装依赖，并把**被其它包依赖**的已构建包
 `pacman -U` 安装进去供后续使用。只有真正作为依赖的包会被装进容器，因此像 `cpeditor` 与
-`cpeditor-bin` 这种互相冲突但无需同时安装的包可以安全共存于同一仓库。
+`cpeditor-bin` 这种互相冲突但无需同时安装的包可以安全共存于同一仓库。自定义来源的包在构建时
+会重新浅克隆到 `work/<pkgbase>`，并进入配置的子目录执行 `makepkg`。
 
 ### 文件名重命名
 
@@ -300,10 +337,10 @@ GitHub Release 附件名只允许字母、数字和 `. - _`。Arch 包文件名�
 对每个包，`plan.py` 采用如下判断（`force` 优先）：
 
 - 未在仓库中 → 构建；
-- AUR 版本 > 已发布版本（`vercmp`）→ 构建；
+- AUR 版本或自定义来源 `.SRCINFO` 的版本 > 已发布版本（`vercmp`）→ 构建；
 - VCS 包（PKGBUILD 里定义了 `pkgver()` 的，如 `…-git`）→ 默认不因版本比较而构建，只有开启
   `update_vcs` 或 `force` 才构建；仅用 `git+…#tag=…` 拉取固定版本的包**不算** VCS。
-- 可选 `rebuild_dependents = true`：某个 AUR 依赖本次被重建时，一并重建依赖它的包。
+- 可选 `rebuild_dependents = true`：某个依赖本次被重建时，一并重建依赖它的包。
 
 已发布版本来自 Release 上的 `<name>.db`，运行器是「无状态」的，不需要往仓库 commit 任何东西。
 
@@ -382,5 +419,6 @@ python3 scripts/plan.py --config packages.toml --repo OWNER/REPO --packages paru
 ## 安全提示
 
 构建过程会在 CI 中执行 AUR 上的 `PKGBUILD`。AUR 包由社区维护，请只构建你信任的包，并留意
-`packages.toml` 的变更。`makepkg` 以非 root 的 `builder` 用户运行，且不会继承 `GH_TOKEN`，
+`packages.toml` 的变更。自定义 Git 来源同样会执行其中的 `PKGBUILD`，请确保仓库和 ref 可信；
+`makepkg` 以非 root 的 `builder` 用户运行，且不会继承 `GH_TOKEN`，
 因此 `PKGBUILD` 无法直接读取发布用的令牌；但请仍然只构建可信来源的包。

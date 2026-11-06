@@ -29,6 +29,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict, deque
+from pathlib import PurePosixPath
 
 AUR_RPC = "https://aur.archlinux.org/rpc/v5"
 AUR_CGIT = "https://aur.archlinux.org/cgit/aur.git/plain"
@@ -102,6 +103,55 @@ DEFAULT_CONFIG = {
 }
 
 
+PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9@._+-]+$")
+CUSTOM_SOURCE_KEYS = {"name", "git", "ref", "path"}
+
+
+def _custom_source(entry: dict) -> dict | None:
+    """Validate and normalise an inline custom-source table.
+
+    Returns ``None`` for a plain AUR package name.  Custom packages are defined
+    as inline tables in ``packages``, for example::
+
+        { name = "dmcl-gtk4-git", git = "https://github.com/aout1145/dmcl.git", ref = "main", path = "packaging/aur/dmcl-gtk4-git" }
+    """
+    unknown = sorted(set(entry) - CUSTOM_SOURCE_KEYS)
+    if unknown:
+        raise ValueError(
+            "unknown key(s) in custom package entry: " + ", ".join(unknown)
+        )
+
+    name = entry.get("name")
+    git = entry.get("git")
+    ref = entry.get("ref")
+    directory = entry.get("path", ".")
+
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"custom package entry is missing 'name': {entry!r}")
+    if not PACKAGE_NAME_RE.fullmatch(name):
+        raise ValueError(f"invalid package name in custom entry: {name!r}")
+    if not isinstance(git, str) or not git.strip():
+        raise ValueError(f"custom package '{name}' is missing 'git'")
+    if ref is not None and (not isinstance(ref, str) or not ref.strip()):
+        raise ValueError(f"custom package '{name}' has an invalid 'ref'")
+    if not isinstance(directory, str) or not directory.strip():
+        raise ValueError(f"custom package '{name}' has an invalid 'path'")
+
+    # Paths are paths inside the cloned repository, always POSIX-style.
+    path = PurePosixPath(directory)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError(
+            f"custom package '{name}' has an unsafe path: {directory!r} "
+            "(must be relative and must not contain '..')"
+        )
+
+    return {
+        "git": git.strip(),
+        "ref": ref.strip() if ref else None,
+        "path": str(path) if str(path) else ".",
+    }
+
+
 def load_config(path: str) -> dict:
     import tomllib
 
@@ -115,13 +165,22 @@ def load_config(path: str) -> dict:
     }
 
     overrides = raw.get("overrides") or {}
-    for name in raw.get("packages") or []:
-        if not isinstance(name, str):
-            raise ValueError(f"invalid package entry: {name!r}")
+    for entry in raw.get("packages") or []:
+        custom: dict | None = None
+        if isinstance(entry, str):
+            name = entry
+        elif isinstance(entry, dict):
+            custom = _custom_source(entry)
+            name = entry["name"]
+        else:
+            raise ValueError(f"invalid package entry: {entry!r}")
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"invalid package entry: {entry!r}")
         ov = overrides.get(name) or {}
         cfg["packages"].append(
             {
                 "name": name,
+                "custom": custom,
                 "skip_check": bool(ov.get("skip_check", False)),
                 "vcs": ov.get("vcs"),
                 "update_vcs": ov.get("update_vcs"),
@@ -137,12 +196,90 @@ class NotFound(Exception):
     """Raised when a package/base does not exist."""
 
 
+class CustomSourceError(RuntimeError):
+    """Raised when a configured custom package source cannot be used."""
+
+
 class AurClient:
     def __init__(self) -> None:
         self._info_cache: dict[str, list[dict]] = {}
         self._src_cache: dict[str, str] = {}
         self._pkgbuild_cache: dict[str, str] = {}
         self._pkgbase_cache: dict[str, str | None] = {}
+        self.custom_sources: dict[str, dict] = {}
+        self._custom_cache: dict[str, tuple[str, str]] = {}
+
+    def add_custom_source(self, pkgbase: str, source: dict) -> None:
+        """Register a package that is built from an arbitrary Git repository."""
+        existing = self.custom_sources.get(pkgbase)
+        if existing is not None and existing != source:
+            raise ValueError(f"conflicting custom sources for package '{pkgbase}'")
+        self.custom_sources[pkgbase] = dict(source)
+
+    def _custom_files(self, pkgbase: str) -> tuple[str, str]:
+        """Clone a custom source once and return ``(.SRCINFO, PKGBUILD)``."""
+        if pkgbase in self._custom_cache:
+            return self._custom_cache[pkgbase]
+        source = self.custom_sources[pkgbase]
+        clone_dir = tempfile.mkdtemp(prefix=f"aur-custom-{pkgbase}-")
+        checkout = os.path.join(clone_dir, "repo")
+        try:
+            cmd = ["git", "clone", "--depth", "1", "--single-branch"]
+            if source.get("ref"):
+                cmd.extend(["--branch", source["ref"]])
+            cmd.extend(["--", source["git"], checkout])
+            proc = run(cmd, check=False, capture_output=True, text=True)
+            if proc.returncode != 0:
+                detail = (proc.stderr or proc.stdout or "").strip()
+                raise CustomSourceError(
+                    f"could not clone custom package '{pkgbase}' from "
+                    f"{source['git']}: {detail or 'git clone failed'}"
+                )
+
+            relative = PurePosixPath(source.get("path") or ".")
+            if relative.is_absolute() or ".." in relative.parts:
+                raise CustomSourceError(
+                    f"custom package '{pkgbase}' has an unsafe path: {relative}"
+                )
+            workdir = os.path.realpath(os.path.join(checkout, *relative.parts))
+            root = os.path.realpath(checkout)
+            if os.path.commonpath([root, workdir]) != root:
+                raise CustomSourceError(
+                    f"custom package '{pkgbase}' path escapes the repository: {relative}"
+                )
+            if not os.path.isdir(workdir):
+                raise CustomSourceError(
+                    f"custom package '{pkgbase}' path does not exist in the "
+                    f"repository: {relative}"
+                )
+
+            paths = {
+                "srcinfo": os.path.join(workdir, ".SRCINFO"),
+                "pkgbuild": os.path.join(workdir, "PKGBUILD"),
+            }
+            for filename in paths.values():
+                if not os.path.isfile(filename):
+                    raise CustomSourceError(
+                        f"custom package '{pkgbase}' is missing {os.path.basename(filename)} "
+                        f"in {relative}"
+                    )
+
+            with open(paths["srcinfo"], "r", encoding="utf-8", errors="replace") as fh:
+                srcinfo = fh.read()
+            with open(paths["pkgbuild"], "r", encoding="utf-8", errors="replace") as fh:
+                pkgbuild = fh.read()
+        finally:
+            shutil.rmtree(clone_dir, ignore_errors=True)
+
+        parsed = parse_srcinfo(srcinfo)
+        if parsed["pkgbase"] != pkgbase:
+            raise CustomSourceError(
+                f"custom package '{pkgbase}' has pkgbase '{parsed['pkgbase']}' "
+                "in its .SRCINFO; the name in packages.toml must match pkgbase"
+            )
+
+        self._custom_cache[pkgbase] = (srcinfo, pkgbuild)
+        return srcinfo, pkgbuild
 
     def info(self, names: list[str]) -> list[dict]:
         results: list[dict] = []
@@ -161,6 +298,8 @@ class AurClient:
         return json.loads(http_get(url)).get("results", [])
 
     def srcinfo(self, pkgbase: str) -> str:
+        if pkgbase in self.custom_sources:
+            return self._custom_files(pkgbase)[0]
         if pkgbase in self._src_cache:
             return self._src_cache[pkgbase]
         cache_dir = os.environ.get("AUR_CACHE")
@@ -193,6 +332,8 @@ class AurClient:
 
     def pkgbuild(self, pkgbase: str) -> str:
         """Fetch the PKGBUILD (used to detect a `pkgver()` function)."""
+        if pkgbase in self.custom_sources:
+            return self._custom_files(pkgbase)[1]
         if pkgbase in self._pkgbuild_cache:
             return self._pkgbuild_cache[pkgbase]
         cache_dir = os.environ.get("AUR_CACHE")
@@ -225,6 +366,9 @@ class AurClient:
 
     def canonical_pkgbase(self, name: str) -> str | None:
         """Map a package name or pkgbase to its pkgbase."""
+        if name in self.custom_sources:
+            self._custom_files(name)
+            return name
         if name in self._pkgbase_cache:
             return self._pkgbase_cache[name]
         result: str | None = None
@@ -331,13 +475,18 @@ def parse_srcinfo(text: str) -> dict:
         "makedepends": get(base, "makedepends"),
         "checkdepends": get(base, "checkdepends"),
         "provides": provides,
-        "vcs_source": any(s.startswith(VCS_SCHEMES) for s in sources),
+        "vcs_source": any(_source_scheme(s).startswith(VCS_SCHEMES) for s in sources),
     }
 
 
 def dep_name(spec: str) -> str:
     """Strip a version constraint from a dependency specification."""
     return re.split(r"[<>=]", spec, 1)[0].strip()
+
+
+def _source_scheme(source: str) -> str:
+    """Return the URL part of a source entry (``name::url`` -> ``url``)."""
+    return source.split("::", 1)[1] if "::" in source else source
 
 
 # GitHub release assets may only contain alphanumerics and ``. - _``; anything
@@ -454,6 +603,7 @@ def resolve(client: AurClient, pacman: Pacman, targets: list[str], run_checks: b
                 node["vcs"] = bool(PKGVER_FUNC_RE.search(client.pkgbuild(pkgbase)))
             except NotFound:
                 pass
+        node["custom"] = client.custom_sources.get(pkgbase)
         nodes[pkgbase] = node
         name_index.setdefault(pkgbase, pkgbase)
         for name in node["pkgnames"]:
