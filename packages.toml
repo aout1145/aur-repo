@@ -29,6 +29,7 @@ packages = [
   "moekoemusic-bin",
   "motrix-next-bin",
   "browser-use-cli",
+  "prince-bin",
   { name = "dmcl-gtk4-git", git = "https://github.com/aout1145/dmcl.git", path = "packaging/aur/dmcl-gtk4-git" },
 ]
 
