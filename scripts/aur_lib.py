@@ -302,14 +302,10 @@ class AurClient:
             return self._custom_files(pkgbase)[0]
         if pkgbase in self._src_cache:
             return self._src_cache[pkgbase]
-        cache_dir = os.environ.get("AUR_CACHE")
-        cache_file = os.path.join(cache_dir, f"{pkgbase}.srcinfo") if cache_dir else None
-        if cache_file and os.path.isfile(cache_file):
-            with open(cache_file, "r", encoding="utf-8") as fh:
-                text = fh.read()
-            if "pkgbase" in text:
-                self._src_cache[pkgbase] = text
-                return text
+        # Always fetch .SRCINFO from the AUR.  Do not persist it on disk across
+        # runs: a stale copy makes plan.py believe an old version is current,
+        # so updates would never be detected.  The in-process cache above is
+        # enough to avoid duplicate requests within a single run.
         try:
             text = http_get(
                 f"{AUR_CGIT}/.SRCINFO?h={urllib.parse.quote(pkgbase)}"
@@ -321,13 +317,6 @@ class AurClient:
         if "pkgbase" not in text:
             raise NotFound(pkgbase)
         self._src_cache[pkgbase] = text
-        if cache_file:
-            try:
-                os.makedirs(cache_dir, exist_ok=True)
-                with open(cache_file, "w", encoding="utf-8") as fh:
-                    fh.write(text)
-            except OSError:
-                pass
         return text
 
     def pkgbuild(self, pkgbase: str) -> str:
@@ -336,14 +325,6 @@ class AurClient:
             return self._custom_files(pkgbase)[1]
         if pkgbase in self._pkgbuild_cache:
             return self._pkgbuild_cache[pkgbase]
-        cache_dir = os.environ.get("AUR_CACHE")
-        cache_file = os.path.join(cache_dir, f"{pkgbase}.PKGBUILD") if cache_dir else None
-        if cache_file and os.path.isfile(cache_file):
-            with open(cache_file, "r", encoding="utf-8") as fh:
-                text = fh.read()
-            if text.strip():
-                self._pkgbuild_cache[pkgbase] = text
-                return text
         try:
             text = http_get(
                 f"{AUR_CGIT}/PKGBUILD?h={urllib.parse.quote(pkgbase)}"
@@ -355,13 +336,6 @@ class AurClient:
         if not text.strip():
             raise NotFound(pkgbase)
         self._pkgbuild_cache[pkgbase] = text
-        if cache_file:
-            try:
-                os.makedirs(cache_dir, exist_ok=True)
-                with open(cache_file, "w", encoding="utf-8") as fh:
-                    fh.write(text)
-            except OSError:
-                pass
         return text
 
     def canonical_pkgbase(self, name: str) -> str | None:

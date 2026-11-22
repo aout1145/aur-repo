@@ -52,8 +52,6 @@ env:
   # assets.  GITHUB_REPOSITORY is provided automatically by Actions and is used
   # by the scripts to locate the repository.
   GH_TOKEN: ${{ github.token }}
-  # Cache of .SRCINFO files fetched from the AUR.
-  AUR_CACHE: ${{ github.workspace }}/.cache/aur
   BUILDER_USER: builder
 
 jobs:
@@ -70,12 +68,6 @@ jobs:
       - name: Install prerequisites
         run: pacman -Syu --noconfirm --needed git python github-cli libarchive
       - uses: actions/checkout@v4
-      - name: Cache AUR metadata
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/.cache/aur
-          key: aur-srcinfo-${{ hashFiles('packages.toml', 'scripts/**') }}
-          restore-keys: aur-srcinfo-
       - name: Plan builds
         id: plan
         run: |
@@ -111,12 +103,6 @@ jobs:
         with:
           path: /var/cache/pacman/pkg
           key: pacman-${{ hashFiles('packages.toml') }}
-      - name: Cache AUR metadata
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/.cache/aur
-          key: aur-srcinfo-${{ hashFiles('packages.toml', 'scripts/**') }}
-          restore-keys: aur-srcinfo-
       - name: Download plan
         uses: actions/download-artifact@v4
         with:
