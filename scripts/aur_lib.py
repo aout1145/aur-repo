@@ -113,7 +113,7 @@ def _custom_source(entry: dict) -> dict | None:
     Returns ``None`` for a plain AUR package name.  Custom packages are defined
     as inline tables in ``packages``, for example::
 
-        { name = "dmcl-gtk4-git", git = "https://github.com/aout1145/dmcl.git", ref = "main", path = "packaging/aur/dmcl-gtk4-git" }
+        { name = "dacite-gtk4-git", git = "https://github.com/aout1145/dmcl.git", ref = "main", path = "packaging/aur/dacite-gtk4-git" }
     """
     unknown = sorted(set(entry) - CUSTOM_SOURCE_KEYS)
     if unknown:

@@ -71,7 +71,7 @@ packages = [
   "paru",
   "aurutils",
   # 自定义来源：Git 仓库 + 可选 ref/path 子目录
-  { name = "dmcl-gtk4-git", git = "https://github.com/aout1145/dmcl.git", ref = "main", path = "packaging/aur/dmcl-gtk4-git" },
+  { name = "dacite-gtk4-git", git = "https://github.com/aout1145/dmcl.git", ref = "main", path = "packaging/aur/dacite-gtk4-git" },
   # "mpv-full-git",      # 示例：会自动带上 AUR 依赖 ffmpeg-git
 ]
 
@@ -106,7 +106,7 @@ skip_check = true   # 不跑 check()
 ```toml
 packages = [
   "paru",
-  { name = "dmcl-gtk4-git", git = "https://github.com/aout1145/dmcl.git", ref = "main", path = "packaging/aur/dmcl-gtk4-git" },
+  { name = "dacite-gtk4-git", git = "https://github.com/aout1145/dmcl.git", ref = "main", path = "packaging/aur/dacite-gtk4-git" },
 ]
 ```
 
